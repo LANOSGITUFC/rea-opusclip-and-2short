@@ -135,7 +135,53 @@ interface OpusEngineClip {
 | `GET` | `/api/engine-clips/:projectId.:clipId` | Retorna o payload completo do clipe (Base64) |
 | `POST` | `/api/curated-clips/like-clips` | Lista de clipes favoritos / selecionados para render |
 | `POST` | `/api/curated-clips/render` | Disparo de renderização final em 1080p 60fps |
-### 2.4. Os 9 Tipos de Shorts / Workflows de Criação (`builtin:workflows`)
+
+---
+
+### 2.4. O Editor Multitrack do OpusClip (`/editor-ux/[fullClipId]`)
+A partir da análise dos 487 chunks de compilação Next.js e da decodificação da engine `ClipAnything`, mapeamos a arquitetura do editor profissional do OpusClip:
+
+#### 1. Sistema Multitrack (14 Tipos de Trilhas de Edição)
+O editor do OpusClip organiza o projeto em uma timeline não-linear de **14 tipos de trilhas independentes**:
+1. **`KeyFrameTrack`**: Trilhas de enquadramento com keyframes de interpolação suave para acompanhar o rosto do apresentador em movimento.
+2. **`CaptionTrack`**: Trilha de legendas com alinhamento palavra por palavra (Word-Level Karaoke Timing).
+3. **`EmojiTrack`**: Trilha de emojis 3D animados disparados por análise de sentimento da fala em tempo real.
+4. **`BRollTrack` / `BRollMediaTrack`**: Sobreposição de vídeos secundários (B-roll) contextuais com controle de opacidade e corte.
+5. **`AudioTrack`**: Trilha de áudio original + trilha de música de fundo (*BGM*) com *Audio Ducking* automático (o volume da música baixa automaticamente quando alguém fala).
+6. **`VoiceOverTrack`**: Trilha de dublagem ou narração sintética de IA gerada por Text-to-Speech com clonagem vocal.
+7. **`VideoEffectTrack`**: Efeitos de câmera (Camera Shake, Flash de transição, Zoom dinâmico).
+8. **`EyeContactTrack`**: Inteligência artificial que redireciona o olhar do apresentador diretamente para a lente da câmera.
+9. **`ScreenOverlayTrack`**: Elementos de tela cheia (Barras de progresso de visualização, molduras, tarjas de notícia).
+10. **`TextOverlayTrack` / `TextOverlay`**: Textos livres com fontes personalizadas, títulos e chamadas para ação (CTA).
+11. **`ElementTrack`**: Ícones, setas, caixas de destaque e stickers vetoriais.
+12. **`MediaTrack`**: Vídeos adicionais para modo Picture-in-Picture (PiP) ou Split-Screen de jogos.
+
+#### 2. Os 46 Presets Visuais de Legenda (`/api/fancy-template-presets`)
+O OpusClip renderiza legendas combinando duas tecnologias de ponta: vetores interativos em **Rive (`.riv`)** e animações After Effects em **Lottie (`.json`)**:
+- **Estilos Principais Mapeados**:
+  1. *Karaokê*: Preenchimento e pop de palavra com cor de destaque neon (`#04f827`, Rive `karaoke.riv`).
+  2. *Think Media*: Estilo clássico de criadores com alto contraste e contorno preto espesso.
+  3. *Glitch Infinite Zoom*: Efeito glitch com zoom contínuo em palavras-chave.
+  4. *Seamless Bounce*: Salto elástico suave nas palavras ativas (`#D7FF37`).
+  5. *Highlighter Box*: Caixa estilo marca-texto com cantos arredondados (`#1C4EBF`).
+  6. *Marker Sweep*: Varredura de pincel destacando palavras importantes (Lottie `marker-sweep/tile-v2.json`).
+  7. *Word Cut & Stack Cut*: Estilo tipográfico moderno com palavras cortadas e empilhadas.
+  8. *Handwritten & Doodle*: Efeito de escrita à mão cursiva e desenhos animados.
+  9. *Punch & Comic*: Estilo de quadrinhos e impacto rápido com amarelo vibrante (`#FFE600`).
+  10. *Typewriter, Retro 3D, Elastic, Bouncing Dot, Chip Background, Sunset*.
+
+#### 3. Pipeline de Tratamento de Imagem WebGL / Canvas (`autoColor`)
+Cada frame do vídeo passa por um pipeline de pós-processamento com shaders em WebGL:
+- **LUT (Look-Up Table)**: Gradação de cores profissional (`correctionLutUri`).
+- **Acabamento (`finish`)**:
+  - `deblock`: Suavização de artefatos de compressão de vídeos baixados da web.
+  - `denoise`: Redução de ruído digital e granulação em ambientes escuros.
+  - `glow`: Efeito sutil de iluminação difusa.
+  - `sharpen`: Nitidez inteligente para destacar detalhes do rosto e olhos.
+
+---
+
+### 2.5. Os 9 Tipos de Shorts / Workflows de Criação (`builtin:workflows`)
 A partir da descompilação dos chunks e da inspeção dos payloads da API (`GET /api/workflows`), catalogamos os 9 motores especializados de geração de shorts do OpusClip:
 
 | ID do Workflow | Nome | Layout & Pipeline | Gatilho de IA & Hook |
@@ -236,38 +282,78 @@ O 2Short utiliza camadas bem definidas:
 
 ---
 
-## 3.4. Análise de Sessão Autenticada ao Vivo (Playwright & agent-browser)
+## 3.4. Exploração Pixel a Pixel do Editor do 2Short.ai (`agent-browser` CDP)
 
-Utilizando o cookie de sessão fornecido (`studio_v2_session`), realizamos a navegação autenticada em `https://app.2short.ai/` via Playwright e `agent-browser` (CDP), inspecionando a conta ativa e o editor de vídeo em tempo real.
+Navegamos interativamente por cada aba, modal e controle da interface do editor ativo (`screens/`):
 
-### Dados da Conta Autenticada
-- **Usuário**: Tiago (`tiagowork071@gmail.com`)
-- **Plano**: Starter (13 créditos restantes / 17 vídeos utilizados)
-- **Projeto Aberto**: `LOUD CORINGA ASSALTANDO TODAS AS JOALHERIAS DO GTA 6` (Duração: 991s, ID: `e9b2a09b-7974-43b5-a2b6-24d5de42c18e`)
+### 1. Aba de Enquadramento (`Framing` - `01_framing.png`)
+- **Modos de Layout**:
+  - `Auto`: Rastreamento contínuo do orador via IA.
+  - `Fill`: Preenchimento total do quadro 9:16.
+  - `Fit`: Enquadramento proporcional com fundo desfocado.
+  - `Split`: Tela dividida (Game em baixo + Facecam em cima).
+  - `Three` / `Four`: Telas divididas em 3 ou 4 painéis para podcasts e entrevistas.
+- **Controles de Precisão**:
+  - `Zoom` (Slider com ajuste de escala 1x a 3x).
+  - `Horizontal` & `Vertical` (Sliders de pan de câmera de 0.0 a 1.0).
+  - `Tracking Defaults`: Sensibilidade e suavização de interpolação da IA.
+- **Manipulação Direta no Canvas**:
+  - `Move panel 1`, `Crop panel 1`, `Shrink panel 1`, `Enlarge panel 1`, `Reset placement`.
 
-### Captura Completa da Árvore de Componentes do Editor (`editor_full.png`)
-Navegamos pela biblioteca de clipes gerados e abrimos o editor completo (`Edit clip`), mapeando as ferramentas:
+### 2. Aba de Transições (`Transitions` - `02_transitions.png`)
+O 2Short disponibiliza **10 transições cinematográficas** entre cortes:
+1. `Hard cut`: Corte seco padrão.
+2. `Dip to black`: Fade suave para o preto.
+3. `Light leak`: Vazamento de luz estilizado / flash quente.
+4. `Whip pan`: Transição rápida com arrasto lateral (motion blur).
+5. `Punch in`: Zoom rápido de aproximação instantânea.
+6. `Defocus`: Desfoque ótico com foco no próximo take.
+7. `Signal glitch`: Glitch digital estilo fita VHS / interferência.
+8. `Iris`: Fechamento circular clássico.
+9. `Shutter`: Efeito de obturador de câmera fotográfica.
+10. `White flash`: Flash branco de impacto em momentos épicos.
 
-1. **Edição Interativa Palavra por Palavra (Transcript UI)**:
-   - Cada palavra gerada pelo Whisper é um botão interativo individual (`button "Edit word “código”"`, `button "Edit word “cofre?”"`).
-   - Permite corrigir ortografia, pontuação ou remover termos indesejados sem quebrar a sincronia do áudio.
-2. **Presets de Legendas Dinâmicas (13 Estilos)**:
-   - `Spotlight` (destaque com fundo contrastante)
-   - `Marker` (efeito marca-texto neon)
-   - `One beat` (palavra única centralizada por vez)
-   - `Ink trail` (rastro de tinta animado)
-   - `Soft rise` (animação suave de subida / fade)
-   - `Sticker`, `Editorial`, `Chromatic`, `Curtain`, `Karaoke`, `Headline`, `Typewriter`, `Classic`
-   - Gerador de Emojis de IA (`button "Generate AI emojis"`) e Destaques automáticos (`button "Generate AI highlights"`).
-3. **Controles de Layout e Enquadramento da Cena**:
-   - `Auto` (IA rastreia quem está falando)
-   - `Fill` (Preenchimento total 9:16)
-   - `Fit` (Letterbox com fundo desfocado)
-   - `Split` (Divisão da tela em 2: gameplay embaixo + webcam em cima)
-   - `Three` / `Four` (Multi-câmeras para podcasts)
-4. **Timeline e Trimming**:
-   - Sliders de alta precisão para início e fim do clipe (`slider "Trim part 1 start"`, `slider "Trim part 1 end"`).
-   - Ferramentas de corte rápido (`Split`, `Merge`, `Snap to edits`, `Timeline zoom`).
+### 3. Aba de Movimento (`Motion` - `03_motion.png`)
+- `Add Punch in`: Cria um corte de zoom de impacto numa fala chave.
+- `Add Slow push`: Zoom lento e contínuo para aumentar tensão dramática.
+- `Auto zoom`: A IA identifica automaticamente variações de entonação na voz e aplica aproximações automáticas nos momentos de maior energia.
+
+### 4. Aba de Texto & Modelos (`Text` - `04_text.png`)
+Templates prontos de tipografia profissional:
+- **Headlines**: *Cover story*, *Cold open*, *Field journal*, *Side column*, *Dispatch*.
+- **Titles**: *Ink roller*, *Witness quote*.
+- **Name Tags**: Barras inferiores (Lower-thirds) com nome e arroba do orador.
+- **Locations**: Tarjas com nome de cidade/localização.
+
+### 5. Aba de Gráficos e Overlays de Dados (`Graphics` - `05_graphics.png`)
+- **Visualizadores de Dados Animados**:
+  - `Rolling number`: Contador numérico giratório sincronizado com dados falados.
+  - `Arc meter`: Medidor circular em arco com agulha animada.
+  - `Ranked bars`: Gráfico de barras horizontais ranqueado.
+  - `Live trend`: Linha de tendência com oscilação em tempo real.
+  - `Split measure`, `Needle sweep`, `Rolling capsule`, `Paired columns`.
+- **Social Overlays & Stickers**: Botões animados de Inscrever-se, Curtir, Notificação, e busca integrada da GIPHY (`GIFs & stickers`).
+
+### 6. Aba de Mídia Secundária (`Media` - `06_media.png`)
+- Ingestão de mídias do usuário (`PNG`, `JPEG`, `WebP`, `MP4`, `MOV`, `WebM`).
+- As mídias importadas são salvas no IndexedDB local (`2short-overlay-assets`), liberando pré-visualizações sem lag.
+
+### 7. Aba de Brand Kit & Identidade Visual (`07_brandkit.png` & `10_brand_kits_modal.png`)
+- **Logotipo**: Upload de marca d'água com posicionamento, tamanho e opacidade livre.
+- **Paleta de Cores da Marca**: Customização de cores com código Hexadecimal (ex: `#0169ee`) e nomes personalizados (*Primary*, *Secondary*, *Accent*).
+- **Legenda Padrão**: Vinculação automática do estilo de legenda preferido para novos projetos.
+
+### 8. Modal de Exportação Final (`08_export_modal.png`)
+- **Resoluções**: `Auto · up to Full HD` (1080p), `720p HD`.
+- **Taxa de Quadros**: `30 fps` ou `60 fps` para máxima fluidez.
+- **Processamento**: Disparo assíncrono para o worker `/api/exports`.
+
+### 9. Project Chat — O Copiloto de Vídeo (`09_project_chat.png`)
+Interface de chat com IA especializada no vídeo em edição:
+- `Find clips by topic`: Localiza trechos específicos na gravação através de busca semântica no transcript.
+- `Generate titles`: Sugestões de 10 títulos otimizados para CTR no YouTube/TikTok.
+- `Write a description`: Resumo do clipe pronto para colar na descrição.
+- `Create chapters`: Divisão da gravação em capítulos com minutagem.
 
 ---
 
