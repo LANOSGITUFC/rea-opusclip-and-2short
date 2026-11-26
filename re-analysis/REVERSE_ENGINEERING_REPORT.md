@@ -173,6 +173,41 @@ O 2Short utiliza camadas bem definidas:
 
 ---
 
+## 3.4. Análise de Sessão Autenticada ao Vivo (Playwright & agent-browser)
+
+Utilizando o cookie de sessão fornecido (`studio_v2_session`), realizamos a navegação autenticada em `https://app.2short.ai/` via Playwright e `agent-browser` (CDP), inspecionando a conta ativa e o editor de vídeo em tempo real.
+
+### Dados da Conta Autenticada
+- **Usuário**: Tiago (`tiagowork071@gmail.com`)
+- **Plano**: Starter (13 créditos restantes / 17 vídeos utilizados)
+- **Projeto Aberto**: `LOUD CORINGA ASSALTANDO TODAS AS JOALHERIAS DO GTA 6` (Duração: 991s, ID: `e9b2a09b-7974-43b5-a2b6-24d5de42c18e`)
+
+### Captura Completa da Árvore de Componentes do Editor (`editor_full.png`)
+Navegamos pela biblioteca de clipes gerados e abrimos o editor completo (`Edit clip`), mapeando as ferramentas:
+
+1. **Edição Interativa Palavra por Palavra (Transcript UI)**:
+   - Cada palavra gerada pelo Whisper é um botão interativo individual (`button "Edit word “código”"`, `button "Edit word “cofre?”"`).
+   - Permite corrigir ortografia, pontuação ou remover termos indesejados sem quebrar a sincronia do áudio.
+2. **Presets de Legendas Dinâmicas (13 Estilos)**:
+   - `Spotlight` (destaque com fundo contrastante)
+   - `Marker` (efeito marca-texto neon)
+   - `One beat` (palavra única centralizada por vez)
+   - `Ink trail` (rastro de tinta animado)
+   - `Soft rise` (animação suave de subida / fade)
+   - `Sticker`, `Editorial`, `Chromatic`, `Curtain`, `Karaoke`, `Headline`, `Typewriter`, `Classic`
+   - Gerador de Emojis de IA (`button "Generate AI emojis"`) e Destaques automáticos (`button "Generate AI highlights"`).
+3. **Controles de Layout e Enquadramento da Cena**:
+   - `Auto` (IA rastreia quem está falando)
+   - `Fill` (Preenchimento total 9:16)
+   - `Fit` (Letterbox com fundo desfocado)
+   - `Split` (Divisão da tela em 2: gameplay embaixo + webcam em cima)
+   - `Three` / `Four` (Multi-câmeras para podcasts)
+4. **Timeline e Trimming**:
+   - Sliders de alta precisão para início e fim do clipe (`slider "Trim part 1 start"`, `slider "Trim part 1 end"`).
+   - Ferramentas de corte rápido (`Split`, `Merge`, `Snap to edits`, `Timeline zoom`).
+
+---
+
 ## 4. Arquitetura do Clone Unificado (OpusClip + 2Short)
 
 Para reconstruir as ferramentas de forma funcional e sem custos abusivos de APIs pagas, a arquitetura do clone será estruturada em 4 módulos:
@@ -225,3 +260,7 @@ Ambas as ferramentas utilizam prompts estruturados enviados a LLMs alimentados p
 | `EVD-2SHORT-001` | `HomeAppBar-CmL0jYx6.js` | Função `ae()` | Mapeamento de todos os endpoints REST de projetos, momentos e word-timings |
 | `EVD-2SHORT-002` | `Editor-DAJ-tHKm.js` | Chunk `Editor` | Sistema de preview, camadas de overlays e estilos de legenda do 2short |
 | `EVD-2SHORT-003` | `overlay-assets-YOYn35B2.js`| IndexedDB `2short-overlay-assets` | Cache de mídia client-side em IndexedDB para zero-latency no editor |
+| `EVD-2SHORT-004` | Live Session Playwright | `studio_v2_session` cookie | Sessão autenticada ao vivo: APIs `/api/account/me`, `/api/credits`, `/api/projects` |
+| `EVD-2SHORT-005` | `agent-browser` CDP Snapshot | `editor_full.png` | Mapeamento completo dos 13 presets de legendas, timeline e edição palavra por palavra |
+| `EVD-2SHORT-006` | Live DOM Tree | Interactive Elements Ref | Árvore de botões e seletores do editor (Auto/Fill/Fit/Split, 9:16, AI emojis e highlights) |
+
