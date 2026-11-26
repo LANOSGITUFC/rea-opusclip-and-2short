@@ -220,12 +220,13 @@ async function processProjectPipeline(projectId) {
 
     const allWords = tr.words || [];
     const now = new Date().toISOString();
+    const detectedCam = faceData.facecamBox || {};
 
     for (const c of curated) {
       const clipWords = allWords.filter(w => w.end >= c.startSec && w.start <= c.endSec);
       const clipKfs = kfs.filter(k => k.t >= c.startSec && k.t <= c.endSec && k.faces > 0);
-      const avgX = clipKfs.length ? clipKfs.reduce((a, b) => a + b.xPct, 0) / clipKfs.length : 0.5;
-      const avgY = clipKfs.length ? clipKfs.reduce((a, b) => a + b.yPct, 0) / clipKfs.length : 0.45;
+      const avgX = clipKfs.length ? clipKfs.reduce((a, b) => a + b.xPct, 0) / clipKfs.length : (detectedCam.camX ?? 0.5);
+      const avgY = clipKfs.length ? clipKfs.reduce((a, b) => a + b.yPct, 0) / clipKfs.length : (detectedCam.camY ?? 0.45);
 
       insertClip.run(
         uuidv4(),
@@ -245,7 +246,15 @@ async function processProjectPipeline(projectId) {
         1,
         "karaoke",
         JSON.stringify({ highlightColor: "#04F827", primaryColor: "#FFFFFF", fontSize: 68, uppercase: true, positionY: 0.72 }),
-        JSON.stringify({ zoom: 1, panX: Number(avgX.toFixed(3)), panY: Number(avgY.toFixed(3)) }),
+        JSON.stringify({
+          zoom: 1,
+          panX: Number(avgX.toFixed(3)),
+          panY: Number(avgY.toFixed(3)),
+          camX: detectedCam.camX ?? Number(avgX.toFixed(3)),
+          camY: detectedCam.camY ?? Number(avgY.toFixed(3)),
+          camW: detectedCam.camW ?? 0.28,
+          camH: detectedCam.camH ?? 0.32
+        }),
         defaultAutoColor,
         JSON.stringify(clipWords),
         updatedProj.workflowId === "builtin:gaming-streams" ? c.title.slice(0, 36) : "",

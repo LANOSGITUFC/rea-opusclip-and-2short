@@ -180,18 +180,20 @@ def cmd_detect_faces(args):
     import cv2
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return {"keyframes": [{"t": 0.0, "xPct": 0.5, "yPct": 0.5, "faces": 0}]}
+        return {"keyframes": [{"t": 0.0, "xPct": 0.5, "yPct": 0.5, "faces": 0}], "facecamBox": None}
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     w = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280
     h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720
 
-    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    face_cascade = cv2.CascadeClassifier(cascade_path)
+    c_default = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    c_alt2 = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml")
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     step = max(1, int(fps * sample_interval))
     keyframes = []
+    detected_boxes = []
     frame_idx = 0
     last_x, last_y = 0.5, 0.42
 
@@ -200,17 +202,18 @@ def cmd_detect_faces(args):
         ret, frame = cap.read()
         if not ret:
             break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(40, 40))
+        gray = clahe.apply(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+        faces = c_alt2.detectMultiScale(gray, scaleFactor=1.12, minNeighbors=3, minSize=(24, 24))
+        if len(faces) == 0:
+            faces = c_default.detectMultiScale(gray, scaleFactor=1.12, minNeighbors=3, minSize=(24, 24))
         t_sec = round(frame_idx / fps, 2)
         if len(faces) > 0:
-            # Pick largest face (active speaker proxy)
             fx, fy, fw, fh = max(faces, key=lambda b: b[2] * b[3])
             cx = (fx + fw / 2.0) / w
             cy = (fy + fh / 2.0) / h
-            # Smooth transition
             last_x = round(0.7 * cx + 0.3 * last_x, 4)
             last_y = round(0.7 * cy + 0.3 * last_y, 4)
+            detected_boxes.append((cx, cy, fw / w, fh / h))
             keyframes.append({
                 "t": t_sec,
                 "xPct": last_x,
@@ -226,7 +229,26 @@ def cmd_detect_faces(args):
     cap.release()
     if not keyframes:
         keyframes = [{"t": 0.0, "xPct": 0.5, "yPct": 0.45, "faces": 0}]
-    return {"keyframes": keyframes}
+
+    # Compute median facecam bounding box (expanded around face for shoulders/headset)
+    facecam_box = None
+    if detected_boxes:
+        xs = sorted(b[0] for b in detected_boxes)
+        ys = sorted(b[1] for b in detected_boxes)
+        ws = sorted(b[2] for b in detected_boxes)
+        hs = sorted(b[3] for b in detected_boxes)
+        mid = len(detected_boxes) // 2
+        mx, my, mw, mh = xs[mid], ys[mid], ws[mid], hs[mid]
+        box_w = max(0.24, min(0.45, mw * 2.8))
+        box_h = max(0.26, min(0.48, mh * 2.6))
+        facecam_box = {
+            "camX": round(max(0.0, min(1.0, mx)), 3),
+            "camY": round(max(0.0, min(1.0, my)), 3),
+            "camW": round(box_w, 3),
+            "camH": round(box_h, 3)
+        }
+
+    return {"keyframes": keyframes, "facecamBox": facecam_box}
 
 
 def hex_to_ass_color(hex_color, alpha=0):
@@ -400,18 +422,30 @@ def cmd_render_clip(args):
             f"[bgb][fgf]overlay=(W-w)/2:(H-h)/2[vbase]"
         )
     elif layout == "split":
-        # Gaming split: Top facecam crop (40% height) + Bottom gameplay (60% height)
+        # Gaming split: Top facecam crop (40% height) centered on camX/camY + Bottom gameplay (60% height)
         top_h = int(out_h * 0.40)
         top_h -= top_h % 2
         bot_h = out_h - top_h
+        cam_x_pct = float(framing.get("camX", pan_x if pan_x != 0.5 else 0.15))
+        cam_y_pct = float(framing.get("camY", pan_y if pan_y != 0.45 else 0.80))
+        cam_w_pct = max(0.15, min(0.65, float(framing.get("camW", 0.28))))
+        cam_h_pct = max(0.15, min(0.65, float(framing.get("camH", 0.32))))
+
+        cw = max(64, int(src_w * cam_w_pct))
+        ch = max(64, int(src_h * cam_h_pct))
+        cw -= cw % 2
+        ch -= ch % 2
+        cx = int(max(0, min(src_w - cw, src_w * cam_x_pct - cw / 2.0)))
+        cy = int(max(0, min(src_h - ch, src_h * cam_y_pct - ch / 2.0)))
+
         filter_parts.append(
             f"[0:v]split=2[vtop][vbot];"
-            f"[vtop]crop=iw*0.35:ih*0.35:iw*0.62:ih*0.05,scale={out_w}:{top_h}:force_original_aspect_ratio=increase,crop={out_w}:{top_h}[top];"
+            f"[vtop]crop={cw}:{ch}:{cx}:{cy},scale={out_w}:{top_h}:force_original_aspect_ratio=increase,crop={out_w}:{top_h}[top];"
             f"[vbot]scale={out_w}:{bot_h}:force_original_aspect_ratio=increase,crop={out_w}:{bot_h}[bot];"
             f"[top][bot]vstack=inputs=2[vbase]"
         )
     else:
-        # Auto / Fill / Three / Four with zoom + pan crop
+        # Auto / Fill / Three / Four — center crop precisely on speaker pan_x, pan_y
         target_ar = out_w / out_h
         src_ar = src_w / src_h
         if src_ar > target_ar:
@@ -422,8 +456,8 @@ def cmd_render_clip(args):
             crop_h = int(crop_w / target_ar)
         crop_w = max(64, min(src_w, crop_w - (crop_w % 2)))
         crop_h = max(64, min(src_h, crop_h - (crop_h % 2)))
-        crop_x = int(max(0, min(src_w - crop_w, (src_w - crop_w) * pan_x)))
-        crop_y = int(max(0, min(src_h - crop_h, (src_h - crop_h) * pan_y)))
+        crop_x = int(max(0, min(src_w - crop_w, src_w * pan_x - crop_w / 2.0)))
+        crop_y = int(max(0, min(src_h - crop_h, src_h * pan_y - crop_h / 2.0)))
         filter_parts.append(f"[0:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={out_w}:{out_h}[vbase]")
 
     current_v = "[vbase]"

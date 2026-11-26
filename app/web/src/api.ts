@@ -72,6 +72,10 @@ export interface Clip {
     zoom: number;
     panX: number;
     panY: number;
+    camX?: number;
+    camY?: number;
+    camW?: number;
+    camH?: number;
   };
   transitionType: string;
   motionType: string;

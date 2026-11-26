@@ -246,21 +246,68 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
         {/* CENTER: Real Video Player + Live Subtitles + Framing */}
         <div className="lg:col-span-4 flex flex-col items-center space-y-3 order-1 lg:order-2">
           <div className={`relative w-full ${aspectClass} bg-black rounded-3xl overflow-hidden border-2 border-slate-700 shadow-2xl`}>
-            {/* Real streaming HTML5 video */}
-            <video
-              ref={videoRef}
-              src={`/api/projects/${clip.projectId}/video`}
-              playsInline
-              muted={muted}
-              onTimeUpdate={handleTimeUpdate}
-              onEnded={() => setPlaying(false)}
-              className={`absolute inset-0 w-full h-full ${clip.layoutMode === "fit" ? "object-contain" : "object-cover"}`}
-              style={{
-                objectPosition: `${(clip.framing.panX ?? 0.5) * 100}% ${(clip.framing.panY ?? 0.5) * 100}%`,
-                transform: `scale(${clip.framing.zoom || 1})`,
-                filter: clip.autoColor?.enabled ? "contrast(1.08) saturate(1.14)" : undefined
-              }}
-            />
+            {/* Real streaming HTML5 video (Split-Screen or Single Frame) */}
+            {clip.layoutMode === "split" ? (
+              <div className="absolute inset-0 flex flex-col">
+                {/* Top 40%: Facecam Crop Preview */}
+                <div className="relative h-[40%] w-full overflow-hidden border-b border-white/20 bg-black">
+                  <video
+                    src={`/api/projects/${clip.projectId}/video`}
+                    playsInline
+                    muted
+                    ref={el => {
+                      if (el && videoRef.current) {
+                        if (Math.abs(el.currentTime - videoRef.current.currentTime) > 0.25) {
+                          el.currentTime = videoRef.current.currentTime;
+                        }
+                        if (playing && el.paused) el.play().catch(() => {});
+                        if (!playing && !el.paused) el.pause();
+                      }
+                    }}
+                    className="w-full h-full object-cover"
+                    style={{
+                      objectPosition: `${(clip.framing.camX ?? 0.15) * 100}% ${(clip.framing.camY ?? 0.8) * 100}%`,
+                      transform: `scale(${Math.max(1.2, 1 / (clip.framing.camW ?? 0.28) * 0.55)})`,
+                      transformOrigin: `${(clip.framing.camX ?? 0.15) * 100}% ${(clip.framing.camY ?? 0.8) * 100}%`,
+                      filter: clip.autoColor?.enabled ? "contrast(1.08) saturate(1.14)" : undefined
+                    }}
+                  />
+                  <span className="absolute top-1.5 left-2 bg-black/70 text-[9px] text-emerald-400 font-mono px-1.5 py-0.5 rounded z-10">
+                    FACECAM ({Math.round((clip.framing.camX ?? 0.15) * 100)}%, {Math.round((clip.framing.camY ?? 0.8) * 100)}%)
+                  </span>
+                </div>
+                {/* Bottom 60%: Gameplay */}
+                <div className="relative h-[60%] w-full overflow-hidden bg-black">
+                  <video
+                    ref={videoRef}
+                    src={`/api/projects/${clip.projectId}/video`}
+                    playsInline
+                    muted={muted}
+                    onTimeUpdate={handleTimeUpdate}
+                    onEnded={() => setPlaying(false)}
+                    className="w-full h-full object-cover"
+                    style={{
+                      filter: clip.autoColor?.enabled ? "contrast(1.08) saturate(1.14)" : undefined
+                    }}
+                  />
+                </div>
+              </div>
+            ) : (
+              <video
+                ref={videoRef}
+                src={`/api/projects/${clip.projectId}/video`}
+                playsInline
+                muted={muted}
+                onTimeUpdate={handleTimeUpdate}
+                onEnded={() => setPlaying(false)}
+                className={`absolute inset-0 w-full h-full ${clip.layoutMode === "fit" ? "object-contain" : "object-cover"}`}
+                style={{
+                  objectPosition: `${(clip.framing.panX ?? 0.5) * 100}% ${(clip.framing.panY ?? 0.5) * 100}%`,
+                  transform: `scale(${clip.framing.zoom || 1})`,
+                  filter: clip.autoColor?.enabled ? "contrast(1.08) saturate(1.14)" : undefined
+                }}
+              />
+            )}
 
             {/* Progress Bar Overlay */}
             {clip.progressBar && (
@@ -510,24 +557,69 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
               </div>
 
               <div className="space-y-2 pt-2 border-t border-slate-800">
-                <label className="block">
-                  <span className="text-[11px] text-slate-400">Zoom ({(clip.framing.zoom || 1).toFixed(2)}x)</span>
-                  <input type="range" min={1} max={2.5} step={0.05} value={clip.framing.zoom || 1}
-                    onChange={e => saveChanges({ framing: { ...clip.framing, zoom: parseFloat(e.target.value) } })}
-                    className="w-full accent-purple-500" />
-                </label>
-                <label className="block">
-                  <span className="text-[11px] text-slate-400">Horizontal Pan ({Math.round((clip.framing.panX ?? 0.5) * 100)}%)</span>
-                  <input type="range" min={0} max={1} step={0.02} value={clip.framing.panX ?? 0.5}
-                    onChange={e => saveChanges({ framing: { ...clip.framing, panX: parseFloat(e.target.value) } })}
-                    className="w-full accent-purple-500" />
-                </label>
-                <label className="block">
-                  <span className="text-[11px] text-slate-400">Vertical Pan ({Math.round((clip.framing.panY ?? 0.5) * 100)}%)</span>
-                  <input type="range" min={0} max={1} step={0.02} value={clip.framing.panY ?? 0.5}
-                    onChange={e => saveChanges({ framing: { ...clip.framing, panY: parseFloat(e.target.value) } })}
-                    className="w-full accent-purple-500" />
-                </label>
+                {clip.layoutMode === "split" ? (
+                  <>
+                    <span className="text-[11px] text-purple-300 font-bold block">Posição da Facecam (Modo Split)</span>
+                    <div className="grid grid-cols-2 gap-1.5 pb-1">
+                      {[
+                        { label: "↖ Sup. Esquerdo", camX: 0.14, camY: 0.18 },
+                        { label: "↗ Sup. Direito", camX: 0.86, camY: 0.18 },
+                        { label: "↙ Inf. Esquerdo", camX: 0.14, camY: 0.82 },
+                        { label: "↘ Inf. Direito", camX: 0.86, camY: 0.82 }
+                      ].map(pos => (
+                        <button
+                          key={pos.label}
+                          onClick={() => saveChanges({ framing: { ...clip.framing, camX: pos.camX, camY: pos.camY } })}
+                          className="py-1.5 px-2 rounded-lg bg-[#090d16] border border-slate-700 hover:border-purple-500 text-[11px] font-semibold text-slate-200"
+                        >
+                          {pos.label}
+                        </button>
+                      ))}
+                    </div>
+                    <label className="block">
+                      <span className="text-[11px] text-slate-400">Facecam Horizontal X ({Math.round((clip.framing.camX ?? 0.15) * 100)}%)</span>
+                      <input type="range" min={0.05} max={0.95} step={0.01} value={clip.framing.camX ?? 0.15}
+                        onChange={e => saveChanges({ framing: { ...clip.framing, camX: parseFloat(e.target.value) } })}
+                        className="w-full accent-emerald-500" />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] text-slate-400">Facecam Vertical Y ({Math.round((clip.framing.camY ?? 0.8) * 100)}%)</span>
+                      <input type="range" min={0.05} max={0.95} step={0.01} value={clip.framing.camY ?? 0.8}
+                        onChange={e => saveChanges({ framing: { ...clip.framing, camY: parseFloat(e.target.value) } })}
+                        className="w-full accent-emerald-500" />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] text-slate-400">Largura do Recorte da Câmera ({Math.round((clip.framing.camW ?? 0.28) * 100)}%)</span>
+                      <input type="range" min={0.15} max={0.55} step={0.01} value={clip.framing.camW ?? 0.28}
+                        onChange={e => {
+                          const v = parseFloat(e.target.value);
+                          saveChanges({ framing: { ...clip.framing, camW: v, camH: Number(Math.min(0.6, v * 1.15).toFixed(2)) } });
+                        }}
+                        className="w-full accent-emerald-500" />
+                    </label>
+                  </>
+                ) : (
+                  <>
+                    <label className="block">
+                      <span className="text-[11px] text-slate-400">Zoom ({(clip.framing.zoom || 1).toFixed(2)}x)</span>
+                      <input type="range" min={1} max={2.5} step={0.05} value={clip.framing.zoom || 1}
+                        onChange={e => saveChanges({ framing: { ...clip.framing, zoom: parseFloat(e.target.value) } })}
+                        className="w-full accent-purple-500" />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] text-slate-400">Horizontal Pan ({Math.round((clip.framing.panX ?? 0.5) * 100)}%)</span>
+                      <input type="range" min={0} max={1} step={0.02} value={clip.framing.panX ?? 0.5}
+                        onChange={e => saveChanges({ framing: { ...clip.framing, panX: parseFloat(e.target.value) } })}
+                        className="w-full accent-purple-500" />
+                    </label>
+                    <label className="block">
+                      <span className="text-[11px] text-slate-400">Vertical Pan ({Math.round((clip.framing.panY ?? 0.5) * 100)}%)</span>
+                      <input type="range" min={0} max={1} step={0.02} value={clip.framing.panY ?? 0.5}
+                        onChange={e => saveChanges({ framing: { ...clip.framing, panY: parseFloat(e.target.value) } })}
+                        className="w-full accent-purple-500" />
+                    </label>
+                  </>
+                )}
               </div>
             </div>
           )}
