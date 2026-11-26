@@ -1,0 +1,11 @@
+# Auth / session state & captures containing credentials (NEVER commit!)
+*auth*.json
+*storageState*.json
+*cookies*.json
+*.har
+*.saz
+.env
+.env.*
+node_modules/
+.rea-cache/
+captures/private/
