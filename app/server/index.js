@@ -7,6 +7,7 @@ const { v4: uuidv4 } = require("uuid");
 const { db, getSettings, saveSettings, listApiKeys } = require("./db");
 const { processProjectPipeline, renderClipJob } = require("./workerBridge");
 const { generateSocialCopy, projectChat } = require("./llm");
+const { registerOAuthRoutes, uploadToYouTubeShorts } = require("./oauth");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -527,18 +528,54 @@ app.post("/api/publish-schedules", (req, res) => {
   res.status(201).json({ schedule: db.prepare("SELECT * FROM publish_schedules WHERE id = ?").get(id) });
 });
 
-app.post("/api/publish-schedules/:id/publish-now", (req, res) => {
-  const item = db.prepare("SELECT * FROM publish_schedules WHERE id = ?").get(req.params.id);
-  if (!item) return res.status(404).json({ error: "Agendamento não encontrado." });
+registerOAuthRoutes(app, uploadLogo);
+
+async function executePublishSchedule(scheduleId) {
+  const item = db.prepare("SELECT * FROM publish_schedules WHERE id = ?").get(scheduleId);
+  if (!item) throw new Error("Agendamento não encontrado.");
   const acc = db.prepare("SELECT * FROM social_accounts WHERE id = ?").get(item.accountId);
+  const clip = db.prepare("SELECT * FROM clips WHERE id = ?").get(item.clipId);
+
   if (!acc || !acc.accessToken) {
-    db.prepare("UPDATE publish_schedules SET status = 'FAILED', errorMsg = ? WHERE id = ?")
-      .run("Conta conectada sem token OAuth válido. Configure o OAuth Token na aba Redes Sociais.", item.id);
-    return res.json({ status: "FAILED", error: "Token OAuth não configurado para publicação real na rede." });
+    const msg = "Conta sem token OAuth válido. Clique em 'Conectar com YouTube / TikTok / Instagram' acima.";
+    db.prepare("UPDATE publish_schedules SET status = 'FAILED', errorMsg = ? WHERE id = ?").run(msg, item.id);
+    return { status: "FAILED", error: msg };
   }
-  db.prepare("UPDATE publish_schedules SET status = 'PUBLISHED', errorMsg = '' WHERE id = ?").run(item.id);
-  res.json({ status: "PUBLISHED" });
+
+  db.prepare("UPDATE publish_schedules SET status = 'UPLOADING', errorMsg = '' WHERE id = ?").run(item.id);
+  try {
+    if (acc.platform === "YOUTUBE") {
+      const publishedUrl = await uploadToYouTubeShorts(item, acc, clip?.exportPath);
+      db.prepare("UPDATE publish_schedules SET status = 'PUBLISHED', publishedUrl = ?, errorMsg = '' WHERE id = ?")
+        .run(publishedUrl, item.id);
+      return { status: "PUBLISHED", publishedUrl };
+    }
+    const msg = `Upload direto automático ainda disponível para YouTube Shorts. Para ${acc.platform}, baixe o MP4 no editor ou aguarde conector v2.`;
+    db.prepare("UPDATE publish_schedules SET status = 'FAILED', errorMsg = ? WHERE id = ?").run(msg, item.id);
+    return { status: "FAILED", error: msg };
+  } catch (err) {
+    db.prepare("UPDATE publish_schedules SET status = 'FAILED', errorMsg = ? WHERE id = ?").run(err.message, item.id);
+    return { status: "FAILED", error: err.message };
+  }
+}
+
+app.post("/api/publish-schedules/:id/publish-now", async (req, res) => {
+  try {
+    const result = await executePublishSchedule(req.params.id);
+    res.json(result);
+  } catch (err) {
+    res.status(404).json({ error: err.message });
+  }
 });
+
+// Background auto-publisher: checks due PENDING schedules every 60s
+setInterval(() => {
+  const nowIso = new Date().toISOString();
+  const due = db.prepare("SELECT id FROM publish_schedules WHERE status = 'PENDING' AND scheduledAt <= ?").all(nowIso);
+  for (const row of due) {
+    executePublishSchedule(row.id).catch(e => console.error("[AutoPublish error]", e.message));
+  }
+}, 60_000);
 
 app.delete("/api/publish-schedules/:id", (req, res) => {
   db.prepare("DELETE FROM publish_schedules WHERE id = ?").run(req.params.id);
