@@ -279,7 +279,31 @@ app.get("/api/projects/:id", (req, res) => {
 });
 
 app.delete("/api/projects/:id", (req, res) => {
-  db.prepare("DELETE FROM projects WHERE id = ?").run(req.params.id);
+  const projectId = req.params.id;
+  const project = db.prepare("SELECT videoPath, audioPath, thumbPath FROM projects WHERE id = ?").get(projectId);
+  const clips = db.prepare("SELECT exportPath FROM clips WHERE projectId = ?").all(projectId);
+
+  // 1. Delete rendered clip MP4s and .ass subtitle files from storage/exports (Drive)
+  for (const c of clips) {
+    if (c.exportPath) {
+      try { if (fs.existsSync(c.exportPath)) fs.unlinkSync(c.exportPath); } catch {}
+      const assPath = c.exportPath.replace(/\.mp4$/i, ".ass");
+      try { if (fs.existsSync(assPath)) fs.unlinkSync(assPath); } catch {}
+    }
+  }
+
+  // 2. Delete uploaded source video (if in storage/uploads) & entire storage/projects/<id> folder
+  if (project?.videoPath) {
+    try { if (fs.existsSync(project.videoPath)) fs.unlinkSync(project.videoPath); } catch {}
+  }
+  const projectDir = path.resolve(__dirname, "../storage/projects", projectId);
+  try {
+    if (fs.existsSync(projectDir)) fs.rmSync(projectDir, { recursive: true, force: true });
+  } catch {}
+
+  // 3. Delete related publish schedules and project (cascades clips & project_chats)
+  db.prepare("DELETE FROM publish_schedules WHERE projectId = ?").run(projectId);
+  db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
   res.json({ ok: true });
 });
 
@@ -458,6 +482,10 @@ app.get("/api/brand-kits/:id/logo", (req, res) => {
 });
 
 app.delete("/api/brand-kits/:id", (req, res) => {
+  const kit = db.prepare("SELECT logoPath FROM brand_kits WHERE id = ?").get(req.params.id);
+  if (kit?.logoPath) {
+    try { if (fs.existsSync(kit.logoPath)) fs.unlinkSync(kit.logoPath); } catch {}
+  }
   db.prepare("DELETE FROM brand_kits WHERE id = ?").run(req.params.id);
   res.json({ ok: true });
 });
