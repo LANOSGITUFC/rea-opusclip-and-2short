@@ -294,6 +294,9 @@ async function renderClipJob(clipId, opts = {}) {
     }
 
     const outPath = path.join(STORAGE_EXPORTS, `${clipId}_${Date.now()}.mp4`);
+    const tracks = JSON.parse(clip.tracksJson || "[]");
+    const bgmTrack = tracks.find(t => t.type === "bgm") || {};
+
     const res = await runPythonWorker("render_clip", {
       video_path: project.videoPath,
       out_path: outPath,
@@ -311,7 +314,14 @@ async function renderClipJob(clipId, opts = {}) {
       words: JSON.parse(clip.wordsJson || "[]"),
       watermark_path: watermarkPath,
       headline_text: clip.headlineText || "",
-      progress_bar: Boolean(clip.progressBar)
+      progress_bar: Boolean(clip.progressBar),
+      transition_type: clip.transitionType || "hard-cut",
+      motion_type: clip.motionType || "none",
+      face_keyframes: JSON.parse(project.faceKeyframesJson || "[]"),
+      bgm_path: bgmTrack.filePath || null,
+      bgm_volume: bgmTrack.volume ?? 0.22,
+      bgm_ducking: bgmTrack.ducking !== false,
+      remove_silences: project.workflowId === "builtin:auto-edits" || Boolean(opts.removeSilences)
     });
 
     db.prepare("UPDATE clips SET exportStatus = 'done', exportPath = ? WHERE id = ?").run(res.exportPath, clipId);

@@ -124,10 +124,18 @@ def cmd_transcribe(args):
     model_size = args.get("model_size", "tiny")
     language = args.get("language") or None
 
+    import wave
+    import numpy as np
     from faster_whisper import WhisperModel
+
+    # Read 16kHz mono PCM WAV directly via stdlib wave + numpy (avoids PyAV metadata_errors bug)
+    with wave.open(audio_path, "rb") as wf:
+        frames = wf.readframes(wf.getnframes())
+        audio_np = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
     segments_gen, info = model.transcribe(
-        audio_path,
+        audio_np,
         language=language,
         word_timestamps=True,
         vad_filter=True,
@@ -177,7 +185,14 @@ def cmd_detect_faces(args):
     video_path = args["video_path"]
     sample_interval = float(args.get("interval_sec", 2.0))
 
-    import cv2
+    try:
+        import cv2
+        CascadeCls = getattr(cv2, "CascadeClassifier", None)
+        if CascadeCls is None or not hasattr(cv2, "data"):
+            return {"keyframes": [{"t": 0.0, "xPct": 0.5, "yPct": 0.45, "faces": 0}], "facecamBox": None}
+    except Exception:
+        return {"keyframes": [{"t": 0.0, "xPct": 0.5, "yPct": 0.45, "faces": 0}], "facecamBox": None}
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return {"keyframes": [{"t": 0.0, "xPct": 0.5, "yPct": 0.5, "faces": 0}], "facecamBox": None}
@@ -187,8 +202,8 @@ def cmd_detect_faces(args):
     w = cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280
     h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720
 
-    c_default = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-    c_alt2 = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml")
+    c_default = CascadeCls(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    c_alt2 = CascadeCls(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml")
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     step = max(1, int(fps * sample_interval))
@@ -370,6 +385,32 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return str(ass_path)
 
 
+def build_dynamic_x_expr(keyframes, start_sec, end_sec, src_w, crop_w, fallback_pan_x):
+    """Build a smooth piecewise-linear FFmpeg crop X expression following detected face keyframes."""
+    pts = []
+    for kf in (keyframes or []):
+        t = float(kf.get("t", 0))
+        if kf.get("faces", 0) > 0 and start_sec - 1.0 <= t <= end_sec + 1.0:
+            rel_t = max(0.0, t - start_sec)
+            px = int(max(0, min(src_w - crop_w, src_w * float(kf["xPct"]) - crop_w / 2.0)))
+            pts.append((round(rel_t, 2), px))
+    if len(pts) < 2:
+        return str(int(max(0, min(src_w - crop_w, src_w * fallback_pan_x - crop_w / 2.0))))
+    # Keep at most 12 evenly spaced points to keep FFmpeg expression compact and fast
+    if len(pts) > 12:
+        step = max(1, len(pts) // 12)
+        pts = pts[::step][:12]
+    # Build nested if(lt(t, t1), lerp, ...)
+    expr = str(pts[-1][1])
+    for i in range(len(pts) - 2, -1, -1):
+        t0, x0 = pts[i]
+        t1, x1 = pts[i + 1]
+        dt = max(0.05, t1 - t0)
+        lerp = f"({x0}+({x1}-{x0})*clip((t-{t0:.2f})/{dt:.2f},0,1))"
+        expr = f"if(lt(t,{t1:.2f}),{lerp},{expr})"
+    return expr
+
+
 def cmd_render_clip(args):
     video_path = args["video_path"]
     out_path = args["out_path"]
@@ -390,6 +431,13 @@ def cmd_render_clip(args):
     watermark_path = args.get("watermark_path")
     headline_text = args.get("headline_text", "")
     progress_bar = bool(args.get("progress_bar", False))
+    transition_type = args.get("transition_type", "hard-cut")
+    motion_type = args.get("motion_type", "none")
+    face_keyframes = args.get("face_keyframes") or []
+    bgm_path = args.get("bgm_path")
+    bgm_volume = float(args.get("bgm_volume", 0.22))
+    bgm_ducking = bool(args.get("bgm_ducking", True))
+    remove_silences = bool(args.get("remove_silences", False))
 
     # Target dimensions
     scale_base = 1080 if resolution == "1080p" else 720
@@ -401,7 +449,6 @@ def cmd_render_clip(args):
         out_w, out_h = (scale_base, scale_base)
     else:  # 16:9
         out_w, out_h = (int(scale_base * 16 / 9), scale_base)
-    # Ensure even dimensions for x264
     out_w -= out_w % 2
     out_h -= out_h % 2
 
@@ -414,7 +461,6 @@ def cmd_render_clip(args):
 
     filter_parts = []
     if layout == "fit":
-        # Blurred background + centered original video
         filter_parts.append(
             f"[0:v]split=2[bg][fg];"
             f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},boxblur=24:4[bgb];"
@@ -422,7 +468,6 @@ def cmd_render_clip(args):
             f"[bgb][fgf]overlay=(W-w)/2:(H-h)/2[vbase]"
         )
     elif layout == "split":
-        # Gaming split: Top facecam crop (40% height) centered on camX/camY + Bottom gameplay (60% height)
         top_h = int(out_h * 0.40)
         top_h -= top_h % 2
         bot_h = out_h - top_h
@@ -445,7 +490,6 @@ def cmd_render_clip(args):
             f"[top][bot]vstack=inputs=2[vbase]"
         )
     else:
-        # Auto / Fill / Three / Four — center crop precisely on speaker pan_x, pan_y
         target_ar = out_w / out_h
         src_ar = src_w / src_h
         if src_ar > target_ar:
@@ -456,14 +500,48 @@ def cmd_render_clip(args):
             crop_h = int(crop_w / target_ar)
         crop_w = max(64, min(src_w, crop_w - (crop_w % 2)))
         crop_h = max(64, min(src_h, crop_h - (crop_h % 2)))
-        crop_x = int(max(0, min(src_w - crop_w, src_w * pan_x - crop_w / 2.0)))
         crop_y = int(max(0, min(src_h - crop_h, src_h * pan_y - crop_h / 2.0)))
-        filter_parts.append(f"[0:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={out_w}:{out_h}[vbase]")
+        if layout == "auto" and face_keyframes:
+            x_expr = build_dynamic_x_expr(face_keyframes, start_sec, end_sec, src_w, crop_w, pan_x)
+            filter_parts.append(f"[0:v]crop={crop_w}:{crop_h}:'{x_expr}':{crop_y},scale={out_w}:{out_h}[vbase]")
+        else:
+            crop_x = int(max(0, min(src_w - crop_w, src_w * pan_x - crop_w / 2.0)))
+            filter_parts.append(f"[0:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={out_w}:{out_h}[vbase]")
 
     current_v = "[vbase]"
     post_filters = []
 
-    # AutoColor filters (sharpen / denoise / contrast)
+    # Real Motion Effects (slow-push, punch-in, auto-zoom)
+    if motion_type == "slow-push":
+        post_filters.append(
+            f"scale=w='trunc(iw*(1+0.12*t/{duration:.2f})/2)*2':h='trunc(ih*(1+0.12*t/{duration:.2f})/2)*2':eval=frame,"
+            f"crop={out_w}:{out_h}:(iw-{out_w})/2:(ih-{out_h})/2"
+        )
+    elif motion_type == "punch-in":
+        post_filters.append(
+            f"scale=w='trunc(iw*if(lt(mod(t,6),1.8),1.12,1.0)/2)*2':h='trunc(ih*if(lt(mod(t,6),1.8),1.12,1.0)/2)*2':eval=frame,"
+            f"crop={out_w}:{out_h}:(iw-{out_w})/2:(ih-{out_h})/2"
+        )
+    elif motion_type == "auto-zoom":
+        post_filters.append(
+            f"scale=w='trunc(iw*(1.04+0.05*sin(t*1.4))/2)*2':h='trunc(ih*(1.04+0.05*sin(t*1.4))/2)*2':eval=frame,"
+            f"crop={out_w}:{out_h}:(iw-{out_w})/2:(ih-{out_h})/2"
+        )
+
+    # Real Transitions
+    if transition_type == "dip-to-black":
+        out_st = max(0.0, duration - 0.45)
+        post_filters.append(f"fade=t=in:st=0:d=0.45,fade=t=out:st={out_st:.2f}:d=0.45")
+    elif transition_type in ("white-flash", "light-leak"):
+        post_filters.append("fade=t=in:st=0:d=0.35:color=white")
+    elif transition_type == "defocus":
+        post_filters.append("boxblur=luma_radius=12:luma_power=2:enable='lt(t,0.45)'")
+    elif transition_type == "signal-glitch":
+        post_filters.append("rgbashift=rh=10:bh=-10:enable='lt(t,0.4)'")
+    elif transition_type in ("shutter", "iris"):
+        post_filters.append("fade=t=in:st=0:d=0.25")
+
+    # AutoColor filters
     if auto_color.get("enabled"):
         if float(auto_color.get("denoise", 0)) > 0:
             post_filters.append("hqdn3d=2:2:4:4")
@@ -472,7 +550,7 @@ def cmd_render_clip(args):
             post_filters.append(f"unsharp=5:5:{amt:.2f}:5:5:0.0")
         post_filters.append("eq=contrast=1.06:saturation=1.12")
 
-    # Progress bar overlay (Social Edit workflow)
+    # Progress bar overlay
     if progress_bar:
         post_filters.append(f"drawbox=x=0:y=0:w='iw*(t/{duration:.3f})':h=12:color=#04F827@0.95:t=fill")
 
@@ -484,7 +562,6 @@ def cmd_render_clip(args):
         )
 
     # ASS subtitles burn-in
-    ass_file = None
     if caption_enabled and words:
         ass_file = str(Path(out_path).with_suffix(".ass"))
         build_ass_subtitles(words, start_sec, end_sec, caption_preset, caption_cfg, out_w, out_h, ass_file)
@@ -496,16 +573,45 @@ def cmd_render_clip(args):
         current_v = "[vpost]"
 
     inputs = ["-ss", f"{start_sec:.3f}", "-t", f"{duration:.3f}", "-i", str(video_path)]
+    next_idx = 1
+
     if watermark_path and os.path.exists(watermark_path):
         inputs += ["-i", str(watermark_path)]
-        filter_parts.append(f"[1:v]scale=140:-1[wm];{current_v}[wm]overlay=W-w-30:30[vout]")
+        filter_parts.append(f"[{next_idx}:v]scale=140:-1[wm];{current_v}[wm]overlay=W-w-30:30[vout]")
         current_v = "[vout]"
+        next_idx += 1
+
+    # Audio handling: optional silence removal + optional BGM with real sidechaincompress Audio Ducking
+    audio_map = "0:a?"
+    has_audio = any(s.get("codec_type") == "audio" for s in json.loads(
+        run_cmd(["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(video_path)]).stdout
+    ).get("streams", []))
+
+    if has_audio and bgm_path and os.path.exists(bgm_path):
+        inputs += ["-stream_loop", "-1", "-t", f"{duration:.3f}", "-i", str(bgm_path)]
+        bgm_idx = next_idx
+        if bgm_ducking:
+            filter_parts.append(
+                f"[0:a]asplit=2[voice][sc];"
+                f"[{bgm_idx}:a]volume={bgm_volume:.2f}[bgmv];"
+                f"[bgmv][sc]sidechaincompress=threshold=0.04:ratio=6:attack=25:release=350[ducked];"
+                f"[voice][ducked]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+            )
+        else:
+            filter_parts.append(
+                f"[{bgm_idx}:a]volume={bgm_volume:.2f}[bgmv];"
+                f"[0:a][bgmv]amix=inputs=2:duration=first[aout]"
+            )
+        audio_map = "[aout]"
+    elif has_audio and remove_silences:
+        filter_parts.append("[0:a]silenceremove=stop_periods=-1:stop_duration=0.65:stop_threshold=-34dB[aout]")
+        audio_map = "[aout]"
 
     filter_complex = ";".join(filter_parts)
     cmd = [
         "ffmpeg", "-y", *inputs,
         "-filter_complex", filter_complex,
-        "-map", current_v, "-map", "0:a?",
+        "-map", current_v, "-map", audio_map,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-r", str(fps), "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "128k",

@@ -402,6 +402,46 @@ app.post("/api/clips/:id/ai-emojis", (req, res) => {
   res.json({ words: enriched });
 });
 
+app.post("/api/clips/:id/bgm", uploadVideo.single("audio"), (req, res) => {
+  const clip = db.prepare("SELECT * FROM clips WHERE id = ?").get(req.params.id);
+  if (!clip) return res.status(404).json({ error: "Clipe não encontrado." });
+  if (!req.file) return res.status(400).json({ error: "Envie um arquivo de áudio (MP3, WAV ou M4A)." });
+
+  const tracks = JSON.parse(clip.tracksJson || "[]").filter(t => t.type !== "bgm");
+  tracks.push({
+    type: "bgm",
+    name: req.file.originalname,
+    filePath: req.file.path,
+    volume: Number(req.body.volume ?? 0.22),
+    ducking: req.body.ducking !== "false"
+  });
+  db.prepare("UPDATE clips SET tracksJson = ? WHERE id = ?").run(JSON.stringify(tracks), clip.id);
+  res.json({ clip: formatClip(db.prepare("SELECT * FROM clips WHERE id = ?").get(clip.id)) });
+});
+
+app.post("/api/clips/:id/translate", async (req, res) => {
+  const clip = db.prepare("SELECT * FROM clips WHERE id = ?").get(req.params.id);
+  if (!clip) return res.status(404).json({ error: "Clipe não encontrado." });
+  const targetLang = req.body.targetLang || "English";
+  const words = JSON.parse(clip.wordsJson || "[]");
+  if (words.length === 0) return res.json({ words });
+
+  try {
+    const { callLLM } = require("./llm");
+    const sys = `Translate the array of subtitle words into ${targetLang}. Keep the EXACT same array length (${words.length} items) so timestamps stay synced. Reply strictly as JSON: {"words": ["w1", "w2", ...]}`;
+    const raw = await callLLM(getSettings(), sys, JSON.stringify(words.map(w => w.text)), true);
+    const parsed = raw ? JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || "{}") : null;
+    if (parsed && Array.isArray(parsed.words) && parsed.words.length > 0) {
+      const translated = words.map((w, i) => ({ ...w, text: String(parsed.words[i] || w.text) }));
+      db.prepare("UPDATE clips SET wordsJson = ? WHERE id = ?").run(JSON.stringify(translated), clip.id);
+      return res.json({ words: translated });
+    }
+    return res.status(400).json({ error: "Configure uma API Key na aba API Keys para traduzir legendas com IA." });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post("/api/clips/:id/render", (req, res) => {
   const clip = db.prepare("SELECT * FROM clips WHERE id = ?").get(req.params.id);
   if (!clip) return res.status(404).json({ error: "Clipe não encontrado." });

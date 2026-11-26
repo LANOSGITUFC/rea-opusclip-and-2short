@@ -695,6 +695,54 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                   ))}
                 </select>
               </label>
+
+              {/* BGM Music with Auto Audio Ducking */}
+              <div className="p-3 rounded-xl bg-[#090d16] border border-slate-800 space-y-2">
+                <span className="font-bold text-purple-300 block">🎵 Música de Fundo (BGM + Audio Ducking)</span>
+                <p className="text-[10px] text-slate-400">O FFmpeg abaixa a música automaticamente quando alguém fala.</p>
+                <label className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold text-center cursor-pointer block">
+                  Enviar MP3 / WAV de Fundo
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={async e => {
+                      const f = e.target.files?.[0];
+                      if (!f) return;
+                      const fd = new FormData();
+                      fd.append("audio", f);
+                      fd.append("volume", "0.22");
+                      fd.append("ducking", "true");
+                      const r = await fetch(`/api/clips/${clip.id}/bgm`, { method: "POST", body: fd }).then(x => x.json());
+                      if (r.clip) setClip(r.clip);
+                    }}
+                  />
+                </label>
+              </div>
+
+              {/* AI Caption Translation */}
+              <div className="p-3 rounded-xl bg-[#090d16] border border-slate-800 space-y-2">
+                <span className="font-bold text-emerald-300 block">🌍 Traduzir Legendas com IA</span>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {["English", "Español", "Português"].map(lang => (
+                    <button
+                      key={lang}
+                      onClick={async () => {
+                        const r = await fetch(`/api/clips/${clip.id}/translate`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ targetLang: lang })
+                        }).then(x => x.json());
+                        if (r.words) setClip(prev => (prev ? { ...prev, words: r.words } : prev));
+                        else if (r.error) alert(r.error);
+                      }}
+                      className="py-1.5 rounded-lg bg-slate-800 hover:bg-emerald-600/30 border border-slate-700 text-[11px] font-bold text-white"
+                    >
+                      {lang}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 

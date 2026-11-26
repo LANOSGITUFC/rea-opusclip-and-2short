@@ -5,12 +5,13 @@
 Sistema full-stack de geração e edição de vídeos curtos virais (Shorts, Reels e TikTok) construído a partir da engenharia reversa (REA + Playwright + `agent-browser`) do **OpusClip** e do **2Short.ai**.
 
 ## Funcionalidades Reais Implementadas
-- **Ingestão Real:** download de vídeos do YouTube/Twitch (`yt-dlp`) ou upload de MP4/MOV/WebM.
-- **9 Workflows do OpusClip:** `long-to-shorts`, `gaming-streams` (Split 9:16), `auto-edits`, `ai-captions`, `ai-reframe`, `social-edit`, `ai-broll`, `auto-cleaning` e `translate-dubbing`.
+- **Ingestão Real:** download de vídeos do YouTube/Twitch (`yt-dlp`) ou upload de MP4/MOV/WebM com exclusão completa do banco e do Google Drive/disco.
+- **9 Workflows do OpusClip:** `long-to-shorts`, `gaming-streams` (Split 9:16 com Facecam ajustável), `auto-edits` (remoção real de silêncios), `ai-captions`, `ai-reframe`, `social-edit`, `ai-broll`, `auto-cleaning` e `translate-dubbing`.
+- **Pool Multi-Key com Rotação & Failover 429:** adicione ilimitadas chaves (Groq, Gemini, OpenAI, OpenRouter) em lote — se uma atingir rate limit 429, o sistema troca automaticamente para a próxima.
 - **Transcrição Palavra por Palavra:** `faster-whisper` local **ou** **Groq Whisper API (`whisper-large-v3-turbo`, grátis e 10x mais rápido)**.
-- **Curadoria de Momentos Virais & Project Chat:** Virality Score (Hook/Ritmo/História) e copiloto de vídeo com suporte a **Groq (grátis)**, **Gemini (grátis)**, **OpenAI** e **OpenRouter**.
-- **Editor Multitrack + Exportação Real em FFmpeg:** 14 presets de legenda karaokê compilados em `.ass`, rastreamento facial OpenCV, modos `Auto/Fill/Fit/Split/Three/Four`, 10 transições, Motion, AutoColor, Brand Kits com watermark e download em MP4 `1080p`/`720p`.
-- **PlanSocial:** conexão de 7 redes sociais, gerador de copy por IA e fila de agendamento.
+- **Curadoria Viral & Project Chat:** Virality Score (Hook/Ritmo/História), tradução automática de legendas com IA e copiloto de vídeo.
+- **Editor Multitrack + Renderização Real em FFmpeg:** 14 presets de legenda karaokê compilados em `.ass`, rastreamento facial dinâmico, modos `Auto/Fill/Fit/Split/Three/Four` com preview dividido real, **10 transições**, **3 modos de Motion zoom**, **BGM com Audio Ducking (`sidechaincompress`)**, **AutoColor**, Brand Kits com watermark e download em MP4 `1080p`/`720p`.
+- **PlanSocial + OAuth 2.0:** login real com YouTube (auto-importa `client_secret.json` do Google Drive `MyDrive/KEYS`), TikTok e Instagram, gerador de copy por IA e upload automático para YouTube Shorts.
 
 ## Como Rodar 100% Gratuito
 Veja o guia completo em [DEPLOY_GRATIS.md](DEPLOY_GRATIS.md):
