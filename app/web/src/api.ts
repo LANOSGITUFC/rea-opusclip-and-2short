@@ -137,6 +137,7 @@ export interface Settings {
   llmModel: string;
   hasApiKey: boolean;
   llmApiKeyMasked: string;
+  whisperProvider: "local" | "groq" | "openai";
   whisperModel: "tiny" | "base" | "small";
   giphyApiKey: string;
   defaultLanguage: string;

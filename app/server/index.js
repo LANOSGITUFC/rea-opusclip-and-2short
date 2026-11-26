@@ -128,7 +128,7 @@ app.get("/api/settings", (_, res) => {
 
 app.post("/api/settings", (req, res) => {
   const patch = {};
-  const allowed = ["llmProvider", "llmModel", "llmApiKey", "whisperModel", "giphyApiKey", "defaultLanguage", "socialCopyPrompt"];
+  const allowed = ["llmProvider", "llmModel", "llmApiKey", "whisperProvider", "whisperModel", "giphyApiKey", "defaultLanguage", "socialCopyPrompt"];
   for (const k of allowed) {
     if (req.body[k] !== undefined) {
       if (k === "llmApiKey" && req.body[k] === "") continue; // don't wipe unless explicit clear

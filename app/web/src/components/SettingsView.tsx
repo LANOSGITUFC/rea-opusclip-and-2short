@@ -19,6 +19,7 @@ export const SettingsView: React.FC = () => {
       llmProvider: settings.llmProvider,
       llmModel: settings.llmModel,
       llmApiKey: apiKeyInput.trim() || undefined,
+      whisperProvider: settings.whisperProvider,
       whisperModel: settings.whisperModel,
       defaultLanguage: settings.defaultLanguage,
       socialCopyPrompt: settings.socialCopyPrompt
@@ -32,12 +33,12 @@ export const SettingsView: React.FC = () => {
   return (
     <form onSubmit={handleSave} className="max-w-2xl mx-auto space-y-5 pb-20">
       <div className="bg-[#111827] border border-slate-800 rounded-2xl p-5 space-y-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2.5">
             <KeyRound className="w-5 h-5 text-purple-400" />
             <div>
               <h2 className="text-base font-extrabold text-white">Chaves de IA & Motor de Transcrição</h2>
-              <p className="text-xs text-slate-400">Salvo somente no SQLite local desta VM (nunca sobe para o GitHub).</p>
+              <p className="text-xs text-slate-400">Salvo somente no SQLite local (nunca sobe para o GitHub).</p>
             </div>
           </div>
           {settings.hasApiKey && (
@@ -55,9 +56,9 @@ export const SettingsView: React.FC = () => {
               onChange={e => setSettings({ ...settings, llmProvider: e.target.value as any })}
               className="w-full px-3 py-2.5 rounded-xl bg-[#090d16] border border-slate-700 text-white"
             >
+              <option value="groq">Groq (Llama 3.3 70B — Grátis & Ultra Rápido)</option>
+              <option value="gemini">Google Gemini (gemini-2.0-flash — Grátis)</option>
               <option value="openai">OpenAI (GPT-4o / GPT-4o-mini)</option>
-              <option value="gemini">Google Gemini (gemini-2.0-flash)</option>
-              <option value="groq">Groq (Llama 3.3 70B — ultra rápido)</option>
               <option value="openrouter">OpenRouter (qualquer modelo)</option>
             </select>
           </label>
@@ -67,7 +68,7 @@ export const SettingsView: React.FC = () => {
             <input
               value={settings.llmModel}
               onChange={e => setSettings({ ...settings, llmModel: e.target.value })}
-              placeholder="ex: gpt-4o-mini ou gemini-2.0-flash"
+              placeholder="ex: llama-3.3-70b-versatile"
               className="w-full px-3 py-2.5 rounded-xl bg-[#090d16] border border-slate-700 text-white"
             />
           </label>
@@ -79,27 +80,40 @@ export const SettingsView: React.FC = () => {
             type="password"
             value={apiKeyInput}
             onChange={e => setApiKeyInput(e.target.value)}
-            placeholder={settings.hasApiKey ? "Cole uma nova chave para substituir a atual..." : "sk-... / AIza... / gsk_..."}
+            placeholder={settings.hasApiKey ? "Cole uma nova chave para substituir a atual..." : "gsk_... / AIza... / sk-..."}
             className="w-full px-3.5 py-2.5 rounded-xl bg-[#090d16] border border-slate-700 text-white font-mono"
           />
         </label>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs pt-2 border-t border-slate-800">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs pt-2 border-t border-slate-800">
           <label className="space-y-1">
-            <span className="font-bold text-slate-300">Modelo Whisper Local (CPU)</span>
+            <span className="font-bold text-slate-300">Motor de Transcrição</span>
+            <select
+              value={settings.whisperProvider}
+              onChange={e => setSettings({ ...settings, whisperProvider: e.target.value as any })}
+              className="w-full px-3 py-2.5 rounded-xl bg-[#090d16] border border-slate-700 text-white"
+            >
+              <option value="groq">Groq Whisper API (Grátis — 10x rápido)</option>
+              <option value="local">Whisper Local (CPU da VM)</option>
+              <option value="openai">OpenAI Whisper API</option>
+            </select>
+          </label>
+
+          <label className="space-y-1">
+            <span className="font-bold text-slate-300">Modelo Local (se CPU)</span>
             <select
               value={settings.whisperModel}
               onChange={e => setSettings({ ...settings, whisperModel: e.target.value as any })}
               className="w-full px-3 py-2.5 rounded-xl bg-[#090d16] border border-slate-700 text-white"
             >
-              <option value="tiny">tiny (Mais rápido em CPU)</option>
-              <option value="base">base (Equilíbrio velocidade/precisão)</option>
-              <option value="small">small (Alta precisão, mais lento)</option>
+              <option value="tiny">tiny (Mais rápido)</option>
+              <option value="base">base (Equilibrado)</option>
+              <option value="small">small (Mais preciso)</option>
             </select>
           </label>
 
           <label className="space-y-1">
-            <span className="font-bold text-slate-300">Idioma Padrão da Transcrição</span>
+            <span className="font-bold text-slate-300">Idioma Padrão</span>
             <select
               value={settings.defaultLanguage}
               onChange={e => setSettings({ ...settings, defaultLanguage: e.target.value })}
@@ -108,7 +122,7 @@ export const SettingsView: React.FC = () => {
               <option value="pt">Português (pt)</option>
               <option value="en">English (en)</option>
               <option value="es">Español (es)</option>
-              <option value="">Detecção Automática</option>
+              <option value="">Automático</option>
             </select>
           </label>
         </div>

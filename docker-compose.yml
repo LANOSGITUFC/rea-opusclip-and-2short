@@ -1,0 +1,12 @@
+services:
+  opus2short:
+    build: .
+    container_name: opus2short-studio
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+    volumes:
+      - ./app/data:/studio/app/data
+      - ./app/storage:/studio/app/storage

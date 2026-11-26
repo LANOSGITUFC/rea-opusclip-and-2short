@@ -81,13 +81,78 @@ async function processProjectPipeline(projectId) {
       });
     }
 
-    // 2. Transcribe with faster-whisper
-    updateProject(projectId, { status: "transcribing", progress: 42, progressMsg: `Transcrevendo áudio com faster-whisper (${settings.whisperModel})...` });
-    const tr = await runPythonWorker("transcribe", {
-      audio_path: media.audioPath,
-      model_size: settings.whisperModel || "tiny",
-      language: settings.defaultLanguage || null
-    });
+async function transcribeViaCloudApi(audioPath, settings) {
+  const fs = require("fs");
+  const { execFileSync } = require("child_process");
+  const apiKey = (settings.llmApiKey || "").trim();
+  if (!apiKey) return null;
+
+  // Compress audio to small mp3 (under 25MB limit for Groq/OpenAI Whisper)
+  const mp3Path = audioPath.replace(/\.wav$/i, ".mp3");
+  execFileSync("ffmpeg", ["-y", "-i", audioPath, "-ac", "1", "-ar", "16000", "-b:a", "48k", mp3Path], { stdio: "ignore" });
+
+  const isGroq = settings.whisperProvider === "groq";
+  const endpoint = isGroq
+    ? "https://api.groq.com/openai/v1/audio/transcriptions"
+    : "https://api.openai.com/v1/audio/transcriptions";
+  const model = isGroq ? "whisper-large-v3-turbo" : "whisper-1";
+
+  const buf = fs.readFileSync(mp3Path);
+  const fd = new FormData();
+  fd.append("file", new Blob([buf], { type: "audio/mpeg" }), "audio.mp3");
+  fd.append("model", model);
+  fd.append("response_format", "verbose_json");
+  fd.append("timestamp_granularities[]", "word");
+  fd.append("timestamp_granularities[]", "segment");
+  if (settings.defaultLanguage) fd.append("language", settings.defaultLanguage);
+
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: fd
+  });
+  if (!res.ok) throw new Error(`Cloud Whisper error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+
+  const words = (data.words || []).map(w => ({
+    text: String(w.word || "").trim(),
+    start: Number(w.start || 0),
+    end: Number(w.end || 0)
+  })).filter(w => w.text);
+
+  const segments = (data.segments || []).map((s, idx) => ({
+    id: idx,
+    start: Number(s.start || 0),
+    end: Number(s.end || 0),
+    text: String(s.text || "").trim()
+  })).filter(s => s.text);
+
+  return {
+    language: data.language || settings.defaultLanguage || "pt",
+    text: data.text || segments.map(s => s.text).join(" "),
+    segments,
+    words
+  };
+}
+
+    // 2. Transcribe (Groq/OpenAI Cloud Whisper if selected, otherwise local faster-whisper)
+    let tr = null;
+    if ((settings.whisperProvider === "groq" || settings.whisperProvider === "openai") && settings.llmApiKey) {
+      updateProject(projectId, { status: "transcribing", progress: 42, progressMsg: `Transcrevendo ultra-rápido via ${settings.whisperProvider.toUpperCase()} Whisper API...` });
+      try {
+        tr = await transcribeViaCloudApi(media.audioPath, settings);
+      } catch (e) {
+        console.error("[Cloud Whisper fallback to local]", e.message);
+      }
+    }
+    if (!tr) {
+      updateProject(projectId, { status: "transcribing", progress: 42, progressMsg: `Transcrevendo áudio com faster-whisper local (${settings.whisperModel})...` });
+      tr = await runPythonWorker("transcribe", {
+        audio_path: media.audioPath,
+        model_size: settings.whisperModel || "tiny",
+        language: settings.defaultLanguage || null
+      });
+    }
 
     updateProject(projectId, {
       language: tr.language || "pt",

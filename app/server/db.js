@@ -138,9 +138,10 @@ function getSettings() {
   const map = {};
   for (const r of rows) map[r.key] = r.value;
   return {
-    llmProvider: map.llmProvider || "openai",
+    llmProvider: map.llmProvider || "groq",
     llmModel: map.llmModel || "",
     llmApiKey: map.llmApiKey || "",
+    whisperProvider: map.whisperProvider || "local", // 'local' | 'groq' | 'openai'
     whisperModel: map.whisperModel || "tiny",
     giphyApiKey: map.giphyApiKey || "",
     defaultLanguage: map.defaultLanguage || "pt",
