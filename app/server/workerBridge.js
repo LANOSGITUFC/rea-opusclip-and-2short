@@ -1,7 +1,8 @@
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 const { v4: uuidv4 } = require("uuid");
-const { db, getSettings } = require("./db");
+const { db, getSettings, getActiveKeysFor, recordKeySuccess, recordKeyError } = require("./db");
 const { curateViralClips } = require("./llm");
 
 const WORKER_SCRIPT = path.resolve(__dirname, "../worker/pipeline.py");
@@ -40,6 +41,76 @@ function updateProject(id, fields) {
   const setSql = keys.map(k => `${k} = ?`).join(", ");
   const vals = keys.map(k => fields[k]);
   db.prepare(`UPDATE projects SET ${setSql} WHERE id = ?`).run(...vals, id);
+}
+
+async function transcribeViaCloudApi(audioPath, settings) {
+  const poolKeys = getActiveKeysFor("whisper", settings.whisperProvider || "groq");
+  const candidates = [...poolKeys];
+  if (settings.llmApiKey && (settings.whisperProvider === "groq" || settings.whisperProvider === "openai")) {
+    if (!candidates.some(c => c.apiKey === settings.llmApiKey)) {
+      candidates.push({ id: null, provider: settings.whisperProvider, apiKey: settings.llmApiKey });
+    }
+  }
+  if (candidates.length === 0) return null;
+
+  const mp3Path = audioPath.replace(/\.wav$/i, ".mp3");
+  execFileSync("ffmpeg", ["-y", "-i", audioPath, "-ac", "1", "-ar", "16000", "-b:a", "48k", mp3Path], { stdio: "ignore" });
+  const buf = fs.readFileSync(mp3Path);
+
+  for (const keyRow of candidates) {
+    try {
+      const isGroq = keyRow.provider === "groq";
+      const endpoint = isGroq
+        ? "https://api.groq.com/openai/v1/audio/transcriptions"
+        : "https://api.openai.com/v1/audio/transcriptions";
+      const model = isGroq ? "whisper-large-v3-turbo" : "whisper-1";
+
+      const fd = new FormData();
+      fd.append("file", new Blob([buf], { type: "audio/mpeg" }), "audio.mp3");
+      fd.append("model", model);
+      fd.append("response_format", "verbose_json");
+      fd.append("timestamp_granularities[]", "word");
+      fd.append("timestamp_granularities[]", "segment");
+      if (settings.defaultLanguage) fd.append("language", settings.defaultLanguage);
+
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${keyRow.apiKey}` },
+        body: fd
+      });
+      if (!res.ok) {
+        const err = new Error(`Cloud Whisper (${keyRow.provider}) ${res.status}: ${(await res.text()).slice(0, 180)}`);
+        err.statusCode = res.status;
+        throw err;
+      }
+      const data = await res.json();
+      recordKeySuccess(keyRow.id);
+
+      const words = (data.words || []).map(w => ({
+        text: String(w.word || "").trim(),
+        start: Number(w.start || 0),
+        end: Number(w.end || 0)
+      })).filter(w => w.text);
+
+      const segments = (data.segments || []).map((s, idx) => ({
+        id: idx,
+        start: Number(s.start || 0),
+        end: Number(s.end || 0),
+        text: String(s.text || "").trim()
+      })).filter(s => s.text);
+
+      return {
+        language: data.language || settings.defaultLanguage || "pt",
+        text: data.text || segments.map(s => s.text).join(" "),
+        segments,
+        words
+      };
+    } catch (err) {
+      console.warn(`[Whisper Pool Failover] Key ${keyRow.id || "legacy"} (${keyRow.provider}) failed:`, err.message);
+      recordKeyError(keyRow.id, err.statusCode || 500, err.message);
+    }
+  }
+  return null;
 }
 
 async function processProjectPipeline(projectId) {
@@ -81,69 +152,11 @@ async function processProjectPipeline(projectId) {
       });
     }
 
-async function transcribeViaCloudApi(audioPath, settings) {
-  const fs = require("fs");
-  const { execFileSync } = require("child_process");
-  const apiKey = (settings.llmApiKey || "").trim();
-  if (!apiKey) return null;
-
-  // Compress audio to small mp3 (under 25MB limit for Groq/OpenAI Whisper)
-  const mp3Path = audioPath.replace(/\.wav$/i, ".mp3");
-  execFileSync("ffmpeg", ["-y", "-i", audioPath, "-ac", "1", "-ar", "16000", "-b:a", "48k", mp3Path], { stdio: "ignore" });
-
-  const isGroq = settings.whisperProvider === "groq";
-  const endpoint = isGroq
-    ? "https://api.groq.com/openai/v1/audio/transcriptions"
-    : "https://api.openai.com/v1/audio/transcriptions";
-  const model = isGroq ? "whisper-large-v3-turbo" : "whisper-1";
-
-  const buf = fs.readFileSync(mp3Path);
-  const fd = new FormData();
-  fd.append("file", new Blob([buf], { type: "audio/mpeg" }), "audio.mp3");
-  fd.append("model", model);
-  fd.append("response_format", "verbose_json");
-  fd.append("timestamp_granularities[]", "word");
-  fd.append("timestamp_granularities[]", "segment");
-  if (settings.defaultLanguage) fd.append("language", settings.defaultLanguage);
-
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}` },
-    body: fd
-  });
-  if (!res.ok) throw new Error(`Cloud Whisper error (${res.status}): ${(await res.text()).slice(0, 200)}`);
-  const data = await res.json();
-
-  const words = (data.words || []).map(w => ({
-    text: String(w.word || "").trim(),
-    start: Number(w.start || 0),
-    end: Number(w.end || 0)
-  })).filter(w => w.text);
-
-  const segments = (data.segments || []).map((s, idx) => ({
-    id: idx,
-    start: Number(s.start || 0),
-    end: Number(s.end || 0),
-    text: String(s.text || "").trim()
-  })).filter(s => s.text);
-
-  return {
-    language: data.language || settings.defaultLanguage || "pt",
-    text: data.text || segments.map(s => s.text).join(" "),
-    segments,
-    words
-  };
-}
-
-    // 2. Transcribe (Groq/OpenAI Cloud Whisper if selected, otherwise local faster-whisper)
+    // 2. Transcribe (Multi-key Groq/OpenAI Cloud Whisper pool, fallback local faster-whisper)
     let tr = null;
-    if ((settings.whisperProvider === "groq" || settings.whisperProvider === "openai") && settings.llmApiKey) {
-      updateProject(projectId, { status: "transcribing", progress: 42, progressMsg: `Transcrevendo ultra-rápido via ${settings.whisperProvider.toUpperCase()} Whisper API...` });
-      try {
-        tr = await transcribeViaCloudApi(media.audioPath, settings);
-      } catch (e) {
-        console.error("[Cloud Whisper fallback to local]", e.message);
-      }
+    if (settings.whisperProvider !== "local") {
+      updateProject(projectId, { status: "transcribing", progress: 42, progressMsg: `Transcrevendo ultra-rápido via pool ${settings.whisperProvider.toUpperCase()} Whisper API...` });
+      tr = await transcribeViaCloudApi(media.audioPath, settings);
     }
     if (!tr) {
       updateProject(projectId, { status: "transcribing", progress: 42, progressMsg: `Transcrevendo áudio com faster-whisper local (${settings.whisperModel})...` });

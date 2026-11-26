@@ -4,7 +4,7 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const { v4: uuidv4 } = require("uuid");
-const { db, getSettings, saveSettings } = require("./db");
+const { db, getSettings, saveSettings, listApiKeys } = require("./db");
 const { processProjectPipeline, renderClipJob } = require("./workerBridge");
 const { generateSocialCopy, projectChat } = require("./llm");
 
@@ -146,6 +146,71 @@ app.post("/api/settings", (req, res) => {
       llmApiKey: undefined
     }
   });
+});
+
+// Multi-Key Pool Management (unlimited keys across Groq, Gemini, OpenAI, OpenRouter)
+function detectProviderFromKey(k, fallback) {
+  if (/^gsk_/i.test(k)) return "groq";
+  if (/^AIza/i.test(k)) return "gemini";
+  if (/^sk-or-/i.test(k)) return "openrouter";
+  if (/^sk-/i.test(k)) return "openai";
+  return fallback || "groq";
+}
+
+app.get("/api/keys", (_, res) => {
+  res.json({ keys: listApiKeys() });
+});
+
+app.post("/api/keys", (req, res) => {
+  const { provider = "groq", label = "", model = "", capabilities = "both", keysText = "", apiKey = "" } = req.body || {};
+  const rawList = (keysText || apiKey || "")
+    .split(/[\r\n,;]+/)
+    .map(s => s.trim())
+    .filter(s => s.length >= 8);
+
+  if (rawList.length === 0) {
+    return res.status(400).json({ error: "Cole pelo menos uma API Key válida." });
+  }
+
+  const stmt = db.prepare(`
+    INSERT INTO api_keys (id, label, provider, apiKey, model, capabilities, enabled, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+  `);
+  const now = new Date().toISOString();
+  let added = 0;
+
+  rawList.forEach((rawKey, idx) => {
+    const prov = provider === "auto" ? detectProviderFromKey(rawKey, "groq") : provider;
+    const keyLabel = label
+      ? (rawList.length > 1 ? `${label} #${idx + 1}` : label)
+      : `${prov.toUpperCase()} #${Date.now().toString().slice(-3)}${idx + 1}`;
+    stmt.run(`KEY_${uuidv4().slice(0, 8)}`, keyLabel, prov, rawKey, model, capabilities, now);
+    added++;
+  });
+
+  res.status(201).json({ ok: true, added, keys: listApiKeys() });
+});
+
+app.patch("/api/keys/:id", (req, res) => {
+  const { enabled, resetCooldown, label, model } = req.body || {};
+  if (enabled !== undefined) {
+    db.prepare("UPDATE api_keys SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, req.params.id);
+  }
+  if (resetCooldown) {
+    db.prepare("UPDATE api_keys SET cooldownUntil = '', lastError = '' WHERE id = ?").run(req.params.id);
+  }
+  if (label !== undefined) {
+    db.prepare("UPDATE api_keys SET label = ? WHERE id = ?").run(String(label), req.params.id);
+  }
+  if (model !== undefined) {
+    db.prepare("UPDATE api_keys SET model = ? WHERE id = ?").run(String(model), req.params.id);
+  }
+  res.json({ ok: true, keys: listApiKeys() });
+});
+
+app.delete("/api/keys/:id", (req, res) => {
+  db.prepare("DELETE FROM api_keys WHERE id = ?").run(req.params.id);
+  res.json({ ok: true, keys: listApiKeys() });
 });
 
 // ==========================================

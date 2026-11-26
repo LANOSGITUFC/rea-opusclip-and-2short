@@ -106,6 +106,30 @@ function fallbackCurateClips(segments, duration, workflowId, projectTitle) {
         const hookScore = Math.min(96, Math.round(70 + (hasQuestion ? 12 : 0) + (hasExcl ? 8 : 0) + Math.min(10, wps * 3)));
         const pacingScore = Math.min(95, Math.round(68 + Math.min(25, wps * 8)));
         const storyScore = Math.min(94, Math.round(72 + Math.min(18, elapsed / 3)));
+        con* Segments video into 25-55s high-density speech windows with scored hooks.
+ */
+function fallbackCurateClips(segments, duration, workflowId, projectTitle) {
+  const targetLen = duration < 60 ? Math.max(10, duration) : 40;
+  const clips = [];
+
+  if (segments && segments.length > 0) {
+    let curStart = segments[0].start;
+    let curText = [];
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i];
+      curText.push(seg.text);
+      const elapsed = seg.end - curStart;
+      const isLast = i === segments.length - 1;
+      if (elapsed >= 25 || isLast) {
+        const endSec = Math.min(duration, Math.max(curStart + 8, seg.end));
+        const textJoined = curText.join(" ").trim();
+        const wordsCount = textJoined.split(/\s+/).length;
+        const wps = wordsCount / Math.max(1, endSec - curStart);
+        const hasQuestion = /\?/.test(textJoined);
+        const hasExcl = /!/.test(textJoined);
+        const hookScore = Math.min(96, Math.round(70 + (hasQuestion ? 12 : 0) + (hasExcl ? 8 : 0) + Math.min(10, wps * 3)));
+        const pacingScore = Math.min(95, Math.round(68 + Math.min(25, wps * 8)));
+        const storyScore = Math.min(94, Math.round(72 + Math.min(18, elapsed / 3)));
         const viralityScore = Math.round(hookScore * 0.45 + pacingScore * 0.3 + storyScore * 0.25);
 
         const snippetTitle = textJoined.split(/[.!?]/)[0].trim().slice(0, 62) || `${projectTitle} — Parte ${clips.length + 1}`;

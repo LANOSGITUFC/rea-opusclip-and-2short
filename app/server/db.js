@@ -131,6 +131,22 @@ db.exec(`
     createdAt TEXT NOT NULL,
     FOREIGN KEY (projectId) REFERENCES projects(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    provider TEXT NOT NULL, -- 'groq' | 'gemini' | 'openai' | 'openrouter'
+    apiKey TEXT NOT NULL,
+    model TEXT DEFAULT '',
+    capabilities TEXT DEFAULT 'both', -- 'both' | 'llm' | 'whisper'
+    enabled INTEGER DEFAULT 1,
+    usageCount INTEGER DEFAULT 0,
+    errorCount INTEGER DEFAULT 0,
+    lastError TEXT DEFAULT '',
+    cooldownUntil TEXT DEFAULT '',
+    lastUsedAt TEXT DEFAULT '',
+    createdAt TEXT NOT NULL
+  );
 `);
 
 function getSettings() {
@@ -141,7 +157,7 @@ function getSettings() {
     llmProvider: map.llmProvider || "groq",
     llmModel: map.llmModel || "",
     llmApiKey: map.llmApiKey || "",
-    whisperProvider: map.whisperProvider || "local", // 'local' | 'groq' | 'openai'
+    whisperProvider: map.whisperProvider || "groq", // 'local' | 'groq' | 'openai'
     whisperModel: map.whisperModel || "tiny",
     giphyApiKey: map.giphyApiKey || "",
     defaultLanguage: map.defaultLanguage || "pt",
@@ -159,4 +175,77 @@ function saveSettings(patch) {
   return getSettings();
 }
 
-module.exports = { db, getSettings, saveSettings };
+function maskKey(k) {
+  if (!k || k.length < 10) return "****";
+  return `${k.slice(0, 6)}...${k.slice(-4)}`;
+}
+
+function listApiKeys() {
+  const rows = db.prepare("SELECT * FROM api_keys ORDER BY createdAt DESC").all();
+  return rows.map(r => ({
+    id: r.id,
+    label: r.label,
+    provider: r.provider,
+    apiKeyMasked: maskKey(r.apiKey),
+    model: r.model,
+    capabilities: r.capabilities,
+    enabled: Boolean(r.enabled),
+    usageCount: r.usageCount,
+    errorCount: r.errorCount,
+    lastError: r.lastError,
+    cooldownUntil: r.cooldownUntil,
+    lastUsedAt: r.lastUsedAt,
+    createdAt: r.createdAt
+  }));
+}
+
+function getActiveKeysFor(capability, preferredProvider = "") {
+  const nowIso = new Date().toISOString();
+  const rows = db.prepare(`
+    SELECT * FROM api_keys
+    WHERE enabled = 1
+      AND (cooldownUntil = '' OR cooldownUntil <= ?)
+      AND (capabilities = 'both' OR capabilities = ?)
+    ORDER BY
+      CASE WHEN provider = ? THEN 0 ELSE 1 END ASC,
+      lastUsedAt ASC,
+      usageCount ASC
+  `).all(nowIso, capability, preferredProvider);
+
+  // If whisper requested, only groq/openai support Whisper audio endpoint
+  if (capability === "whisper") {
+    return rows.filter(r => r.provider === "groq" || r.provider === "openai");
+  }
+  return rows;
+}
+
+function recordKeySuccess(id) {
+  if (!id) return;
+  db.prepare(`
+    UPDATE api_keys
+    SET usageCount = usageCount + 1, lastUsedAt = ?, lastError = '', cooldownUntil = ''
+    WHERE id = ?
+  `).run(new Date().toISOString(), id);
+}
+
+function recordKeyError(id, statusCode, message) {
+  if (!id) return;
+  // 429 rate-limit -> 15 min cooldown; 401/403 -> 60 min cooldown; other -> 2 min cooldown
+  const cooldownMs = statusCode === 429 ? 15 * 60_000 : (statusCode === 401 || statusCode === 403) ? 60 * 60_000 : 2 * 60_000;
+  const until = new Date(Date.now() + cooldownMs).toISOString();
+  db.prepare(`
+    UPDATE api_keys
+    SET errorCount = errorCount + 1, lastError = ?, cooldownUntil = ?
+    WHERE id = ?
+  `).run(String(message || "Erro na API").slice(0, 220), until, id);
+}
+
+module.exports = {
+  db,
+  getSettings,
+  saveSettings,
+  listApiKeys,
+  getActiveKeysFor,
+  recordKeySuccess,
+  recordKeyError
+};

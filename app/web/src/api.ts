@@ -144,6 +144,22 @@ export interface Settings {
   socialCopyPrompt: string;
 }
 
+export interface ApiKeyItem {
+  id: string;
+  label: string;
+  provider: "groq" | "gemini" | "openai" | "openrouter";
+  apiKeyMasked: string;
+  model: string;
+  capabilities: "both" | "llm" | "whisper";
+  enabled: boolean;
+  usageCount: number;
+  errorCount: number;
+  lastError: string;
+  cooldownUntil: string;
+  lastUsedAt: string;
+  createdAt: string;
+}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   const data = await res.json().catch(() => ({}));
@@ -162,6 +178,22 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     }),
+
+  getApiKeys: () => req<{ keys: ApiKeyItem[] }>("/api/keys"),
+  addApiKeys: (body: { provider: string; label?: string; model?: string; capabilities?: string; keysText: string }) =>
+    req<{ ok: boolean; added: number; keys: ApiKeyItem[] }>("/api/keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }),
+  updateApiKey: (id: string, body: Record<string, unknown>) =>
+    req<{ ok: boolean; keys: ApiKeyItem[] }>(`/api/keys/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }),
+  deleteApiKey: (id: string) =>
+    req<{ ok: boolean; keys: ApiKeyItem[] }>(`/api/keys/${id}`, { method: "DELETE" }),
 
   getProjects: () => req<{ projects: ProjectSummary[] }>("/api/projects"),
   createYoutubeProject: (url: string, workflowId: string) =>
