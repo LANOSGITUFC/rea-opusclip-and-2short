@@ -62,9 +62,52 @@ async function callLLM(settings, systemPrompt, userPrompt, expectJson = false) {
   };
 
   const res = await fetch(baseUrl, { method: "POST", headers, body: JSON.stringify(body) });
-  if (!res.ok) throw new Error(`${provider} API error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  if (!res.ok) {
+    const err = new Error(`${provider} API error (${res.status}): ${(await res.text()).slice(0, 180)}`);
+    err.statusCode = res.status;
+    throw err;
+  }
   const data = await res.json();
   return data.choices?.[0]?.message?.content || "";
+}
+
+async function callLLM(settings, systemPrompt, userPrompt, expectJson = false) {
+  const poolKeys = getActiveKeysFor("llm", settings.llmProvider || "groq");
+  const candidates = [...poolKeys];
+
+  if (settings.llmApiKey && !candidates.some(c => c.apiKey === settings.llmApiKey)) {
+    candidates.push({
+      id: null,
+      provider: settings.llmProvider || "groq",
+      model: settings.llmModel || "",
+      apiKey: settings.llmApiKey
+    });
+  }
+
+  if (candidates.length === 0) return null;
+
+  let lastErr = null;
+  for (const keyRow of candidates) {
+    try {
+      const result = await callSingleProvider(
+        keyRow.provider,
+        keyRow.model || settings.llmModel,
+        keyRow.apiKey,
+        systemPrompt,
+        userPrompt,
+        expectJson
+      );
+      recordKeySuccess(keyRow.id);
+      return result;
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[LLM Pool Failover] Key ${keyRow.id || "legacy"} (${keyRow.provider}) failed:`, err.message);
+      recordKeyError(keyRow.id, err.statusCode || 500, err.message);
+    }
+  }
+
+  if (lastErr) throw lastErr;
+  return null;
 }
 
 function parseJsonSafe(raw) {
@@ -83,30 +126,6 @@ function parseJsonSafe(raw) {
 /**
  * Deterministic local clip curator when no LLM key is set (or if LLM fails).
  * Segments video into 25-55s high-density speech windows with scored hooks.
- */
-function fallbackCurateClips(segments, duration, workflowId, projectTitle) {
-  const targetLen = duration < 60 ? Math.max(10, duration) : 40;
-  const clips = [];
-
-  if (segments && segments.length > 0) {
-    let curStart = segments[0].start;
-    let curText = [];
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
-      curText.push(seg.text);
-      const elapsed = seg.end - curStart;
-      const isLast = i === segments.length - 1;
-      if (elapsed >= 25 || isLast) {
-        const endSec = Math.min(duration, Math.max(curStart + 8, seg.end));
-        const textJoined = curText.join(" ").trim();
-        const wordsCount = textJoined.split(/\s+/).length;
-        const wps = wordsCount / Math.max(1, endSec - curStart);
-        const hasQuestion = /\?/.test(textJoined);
-        const hasExcl = /!/.test(textJoined);
-        const hookScore = Math.min(96, Math.round(70 + (hasQuestion ? 12 : 0) + (hasExcl ? 8 : 0) + Math.min(10, wps * 3)));
-        const pacingScore = Math.min(95, Math.round(68 + Math.min(25, wps * 8)));
-        const storyScore = Math.min(94, Math.round(72 + Math.min(18, elapsed / 3)));
-        con* Segments video into 25-55s high-density speech windows with scored hooks.
  */
 function fallbackCurateClips(segments, duration, workflowId, projectTitle) {
   const targetLen = duration < 60 ? Math.max(10, duration) : 40;
