@@ -9,3 +9,15 @@
 node_modules/
 .rea-cache/
 captures/private/
+
+# Runtime app storage, SQLite DB & rendered media
+app/data/
+app/storage/
+app/web/dist/
+*.db
+*.db-shm
+*.db-wal
+*.mp4
+*.m4a
+*.wav
+*.ass

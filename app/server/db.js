@@ -1,0 +1,161 @@
+const path = require("path");
+const fs = require("fs");
+const { DatabaseSync } = require("node:sqlite");
+
+const DATA_DIR = path.resolve(__dirname, "../data");
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const DB_PATH = path.join(DATA_DIR, "studio.db");
+const db = new DatabaseSync(DB_PATH);
+
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA foreign_keys = ON;
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    channel TEXT DEFAULT '',
+    sourceType TEXT NOT NULL, -- 'youtube' | 'upload'
+    sourceUrl TEXT DEFAULT '',
+    workflowId TEXT DEFAULT 'builtin:long-to-shorts',
+    videoPath TEXT DEFAULT '',
+    audioPath TEXT DEFAULT '',
+    thumbPath TEXT DEFAULT '',
+    duration REAL DEFAULT 0,
+    width INTEGER DEFAULT 1280,
+    height INTEGER DEFAULT 720,
+    fps REAL DEFAULT 30,
+    status TEXT DEFAULT 'queued', -- 'queued' | 'downloading' | 'transcribing' | 'tracking' | 'curating' | 'ready' | 'error'
+    progress INTEGER DEFAULT 0,
+    progressMsg TEXT DEFAULT 'Na fila...',
+    errorMsg TEXT DEFAULT '',
+    language TEXT DEFAULT 'pt',
+    transcriptText TEXT DEFAULT '',
+    segmentsJson TEXT DEFAULT '[]',
+    wordsJson TEXT DEFAULT '[]',
+    faceKeyframesJson TEXT DEFAULT '[]',
+    brandKitId TEXT DEFAULT '',
+    createdAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS clips (
+    id TEXT PRIMARY KEY,
+    projectId TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    hashtags TEXT DEFAULT '',
+    viralityScore INTEGER DEFAULT 80,
+    hookScore INTEGER DEFAULT 80,
+    pacingScore INTEGER DEFAULT 80,
+    storyScore INTEGER DEFAULT 80,
+    reason TEXT DEFAULT '',
+    startSec REAL NOT NULL,
+    endSec REAL NOT NULL,
+    aspectRatio TEXT DEFAULT '9:16',
+    layoutMode TEXT DEFAULT 'auto', -- 'auto' | 'fill' | 'fit' | 'split' | 'three' | 'four'
+    captionEnabled INTEGER DEFAULT 1,
+    captionPreset TEXT DEFAULT 'karaoke',
+    captionConfigJson TEXT DEFAULT '{}',
+    framingJson TEXT DEFAULT '{"zoom":1,"panX":0.5,"panY":0.5}',
+    transitionType TEXT DEFAULT 'hard-cut',
+    motionType TEXT DEFAULT 'none',
+    autoColorJson TEXT DEFAULT '{"enabled":false,"denoise":0,"sharpen":0.5,"deblock":0.2,"glow":0}',
+    tracksJson TEXT DEFAULT '[]',
+    wordsJson TEXT DEFAULT '[]',
+    headlineText TEXT DEFAULT '',
+    progressBar INTEGER DEFAULT 0,
+    brandKitId TEXT DEFAULT '',
+    liked INTEGER DEFAULT 0,
+    exportPath TEXT DEFAULT '',
+    exportStatus TEXT DEFAULT 'idle', -- 'idle' | 'rendering' | 'done' | 'error'
+    exportError TEXT DEFAULT '',
+    createdAt TEXT NOT NULL,
+    FOREIGN KEY (projectId) REFERENCES projects(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS brand_kits (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    logoPath TEXT DEFAULT '',
+    primaryColor TEXT DEFAULT '#0169EE',
+    highlightColor TEXT DEFAULT '#04F827',
+    secondaryColor TEXT DEFAULT '#FF37B9',
+    fontFamily TEXT DEFAULT 'DejaVu Sans',
+    defaultPreset TEXT DEFAULT 'karaoke',
+    watermarkPosition TEXT DEFAULT 'top-right',
+    watermarkOpacity REAL DEFAULT 0.9,
+    createdAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS social_accounts (
+    id TEXT PRIMARY KEY,
+    platform TEXT NOT NULL, -- YOUTUBE | TIKTOK_BUSINESS | INSTAGRAM_BUSINESS | FACEBOOK | LINKEDIN | TWITTER | THREADS
+    accountName TEXT NOT NULL,
+    handle TEXT DEFAULT '',
+    profileUrl TEXT DEFAULT '',
+    scopesJson TEXT DEFAULT '[]',
+    accessToken TEXT DEFAULT '',
+    refreshToken TEXT DEFAULT '',
+    enabled INTEGER DEFAULT 1,
+    createdAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS publish_schedules (
+    id TEXT PRIMARY KEY,
+    clipId TEXT NOT NULL,
+    projectId TEXT NOT NULL,
+    accountId TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    hashtags TEXT DEFAULT '',
+    scheduledAt TEXT NOT NULL,
+    timezone TEXT DEFAULT 'America/Sao_Paulo',
+    status TEXT DEFAULT 'PENDING', -- PENDING | UPLOADING | PUBLISHED | FAILED
+    errorMsg TEXT DEFAULT '',
+    publishedUrl TEXT DEFAULT '',
+    createdAt TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS project_chats (
+    id TEXT PRIMARY KEY,
+    projectId TEXT NOT NULL,
+    role TEXT NOT NULL, -- 'user' | 'assistant'
+    content TEXT NOT NULL,
+    createdAt TEXT NOT NULL,
+    FOREIGN KEY (projectId) REFERENCES projects(id) ON DELETE CASCADE
+  );
+`);
+
+function getSettings() {
+  const rows = db.prepare("SELECT key, value FROM settings").all();
+  const map = {};
+  for (const r of rows) map[r.key] = r.value;
+  return {
+    llmProvider: map.llmProvider || "openai",
+    llmModel: map.llmModel || "",
+    llmApiKey: map.llmApiKey || "",
+    whisperModel: map.whisperModel || "tiny",
+    giphyApiKey: map.giphyApiKey || "",
+    defaultLanguage: map.defaultLanguage || "pt",
+    socialCopyPrompt: map.socialCopyPrompt || "Escreva título chamativo, descrição curta e hashtags virais em português do Brasil."
+  };
+}
+
+function saveSettings(patch) {
+  const stmt = db.prepare("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
+  for (const [k, v] of Object.entries(patch)) {
+    if (v !== undefined && v !== null) {
+      stmt.run(k, String(v));
+    }
+  }
+  return getSettings();
+}
+
+module.exports = { db, getSettings, saveSettings };
