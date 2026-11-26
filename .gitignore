@@ -1,5 +1,6 @@
 # Auth / session state & captures containing credentials (NEVER commit!)
 *auth*.json
+*state*.json
 *storageState*.json
 *cookies*.json
 *.har
@@ -9,6 +10,13 @@
 node_modules/
 .rea-cache/
 captures/private/
+
+# Raw reverse-engineering scratch dumps & screenshots
+re-analysis/opusclip/chunks/
+re-analysis/opusclip/api_calls.json
+re-analysis/opusclip/rea_capture_summary.json
+re-analysis/opusclip/dashboard_test.png
+re-analysis/2short/
 
 # Runtime app storage, SQLite DB & rendered media
 app/data/
