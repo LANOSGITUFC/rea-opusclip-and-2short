@@ -135,10 +135,73 @@ interface OpusEngineClip {
 | `GET` | `/api/engine-clips/:projectId.:clipId` | Retorna o payload completo do clipe (Base64) |
 | `POST` | `/api/curated-clips/like-clips` | Lista de clipes favoritos / selecionados para render |
 | `POST` | `/api/curated-clips/render` | Disparo de renderização final em 1080p 60fps |
-| `GET` | `/api/brand-templates` | Lista de molduras, fontes, estilos de legenda e logos |
-| `GET` | `/api/importable-youtube-playlists` | Importação automática de canais e playlists do YouTube |
+### 2.4. Os 9 Tipos de Shorts / Workflows de Criação (`builtin:workflows`)
+A partir da descompilação dos chunks e da inspeção dos payloads da API (`GET /api/workflows`), catalogamos os 9 motores especializados de geração de shorts do OpusClip:
+
+| ID do Workflow | Nome | Layout & Pipeline | Gatilho de IA & Hook |
+|---|---|---|---|
+| `builtin:gaming-streams` | **Clip gaming streams** | Split-Screen 9:16 (Webcam no topo + Gameplay embaixo) | Detecta clutch plays, gritos/reações e momentos de alta ação. Hook tipo `headline` |
+| `builtin:long-to-shorts` | **Clip long video** | Reframe 9:16 dinâmico com speaker tracking | Mineração de ganchos virais e clímax narrativo em podcasts e entrevistas |
+| `builtin:auto-edits` | **Auto-edit talking videos** | Zoom in/out dinâmico, cortes de pausas | Remove silêncios ("uhm", pausas mortas) e adiciona efeitos visuais de retenção |
+| `builtin:ai-captions` | **Captions** | Legendas animadas Karaokê | Sincronia palavra por palavra com emojis automáticos e cores de destaque |
+| `builtin:ai-reframe` | **Reframe** | Reenquadramento automático | Detecta rotação e múltiplos interlocutores sem crop manual |
+| `builtin:social-edit` | **Social Edit** | Barras de progresso, headlines virais | Elementos gráficos de engajamento para retenção nos primeiros 3 segundos |
+| `builtin:ai-broll` | **AI B-roll** | Sobreposição de mídias contextuais | Insere vídeos de stock e GIFs baseados nas entidades semânticas da fala |
+| `builtin:auto-cleaning` | **Clean up recording** | Filtro de áudio + LUT de vídeo | Denoise, remoção de eco, ajuste de contato visual e color grading |
+| `builtin:translate-dubbing` | **Translate & dub** | Clonagem de voz e dublagem | Tradução e dublagem para 20+ idiomas mantendo o timbre do locutor |
 
 ---
+
+### 2.5. Conexões de Redes Sociais & Motor de Agendamento (`PlanSocial`)
+Através da inspeção do HAR e do dicionário oficial `plansocial_schema.json`, mapeamos todo o subsistema de distribuição social do OpusClip:
+
+#### 1. Plataformas Sociais Suportadas & Permissões OAuth:
+O OpusClip integra-se nativamente com 7 grandes plataformas:
+- **YouTube Shorts (`YOUTUBE`)**:
+  - Scopes: `https://www.googleapis.com/auth/youtube.upload`, `https://www.googleapis.com/auth/yt-analytics.readonly`, `https://www.googleapis.com/auth/youtube`
+  - Upload direto via API de vídeos em até 1080p 60fps com privacidade (`public`, `unlisted`, `private`).
+- **TikTok (`TIKTOK_BUSINESS`)**:
+  - Scopes: `user.info.username`, `video.publish`, `video.upload`, `user.info.basic`, `user.account.type`
+  - Restrição mapeada: O TikTok impõe limite de frequência e exige verificação de tipo de conta (`TIKTOK_BUSINESS` vs Creator).
+- **Instagram Reels (`INSTAGRAM_BUSINESS`)**:
+  - Conexão via Meta Graph API / Facebook Business Manager para publicação automática direta em Reels.
+- **Facebook Reels (`FACEBOOK`)**: Suporte a páginas e perfis profissionais.
+- **LinkedIn Video (`LINKEDIN`)**: Publicação de vídeos curtos em perfis ou páginas organizacionais.
+- **X / Twitter (`TWITTER` / `X`)**: Upload de mídia em chunks (`media/upload`) com texto e hashtags.
+- **Meta Threads (`THREADS`)**: Suporte via Threads API para publicação de vídeos verticais.
+
+#### 2. Gerador de Copy Social por IA (`/api/social-copy`):
+Antes de agendar, o OpusClip gera títulos, descrições e hashtags customizadas por plataforma a partir de prompts do usuário.
+- Payload de Envio:
+  ```json
+  {
+    "requests": [{
+      "projectId": "P3112611KQXy",
+      "curationId": "kngfJYLM1K",
+      "platform": "YOUTUBE",
+      "prompt": "quero titulo e etc... em português e em inglês, priorizando o português!"
+    }]
+  }
+  ```
+- Resposta Decodificada:
+  ```json
+  {
+    "title": "A melhor pintura do jogo | Best Game Painting #shorts",
+    "description": "A tinta azul-esverdeada transforma a preparação para pintar em um momento épico. / Teal paint turns getting ready to paint into an epic moment.",
+    "hashtags": "#PinturaNoJogo #Jogos #Gaming #GamePainting"
+  }
+  ```
+
+#### 3. Motor do Calendário de Agendamento (`/api/publish-schedules` & `/api/post-tasks`):
+- **Grade de Calendário**:
+  - `GET /api/publish-schedules?startAt=...&endAt=...&timezone=America/Sao_Paulo`
+  - Visualização por Mês, Semana ou Dia com slots automáticos de melhor horário para postagem.
+- **Disparo de Agendamento**:
+  - `POST /api/publish-schedules`: Cria uma tarefa na fila de publicação com data/hora e metadados de cada rede social.
+  - `POST /api/publish-schedules/:id/publish-now`: Publicação instantânea sem aguardar a fila.
+- **Acompanhamento de Status (`/api/post-tasks`)**:
+  - Fila assíncrona gerenciada com estados: `PENDING` ➔ `UPLOADING` ➔ `PROCESSING` ➔ `PUBLISHED` (ou `FAILED` com mensagem de retry).
+
 
 ## 3. Engenharia Reversa do 2Short.ai (`app.2short.ai`)
 
