@@ -12,7 +12,7 @@ const { registerOAuthRoutes, uploadToYouTubeShorts } = require("./oauth");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const { STORAGE_UPLOADS, STORAGE_BRANDKITS, STORAGE_PROJECTS, STORAGE_EXPORTS } = require("./paths");
+const { DATA_DIR, STORAGE_UPLOADS, STORAGE_BRANDKITS, STORAGE_PROJECTS, STORAGE_EXPORTS } = require("./paths");
 const WEB_DIST = path.resolve(__dirname, "../web/dist");
 
 app.use(cors());
@@ -187,6 +187,47 @@ app.post("/api/settings", (req, res) => {
       llmApiKey: undefined
     }
   });
+});
+
+// YouTube Cookies (.txt) management
+const uploadCookies = multer({
+  storage: multer.diskStorage({
+    destination: (_, __, cb) => cb(null, DATA_DIR),
+    filename: (_, ___, cb) => cb(null, "cookies.txt")
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
+app.get("/api/settings/cookies", (_, res) => {
+  const cPath = path.join(DATA_DIR, "cookies.txt");
+  const exists = fs.existsSync(cPath);
+  let size = 0;
+  let modifiedAt = null;
+  if (exists) {
+    const st = fs.statSync(cPath);
+    size = st.size;
+    modifiedAt = st.mtime.toISOString();
+  }
+  res.json({ hasCookies: exists && size > 32, sizeBytes: size, modifiedAt });
+});
+
+app.post("/api/settings/cookies", uploadCookies.single("cookies"), (req, res) => {
+  if (!req.file) {
+    if (typeof req.body?.cookiesText === "string" && req.body.cookiesText.trim().length > 32) {
+      fs.writeFileSync(path.join(DATA_DIR, "cookies.txt"), req.body.cookiesText.trim(), "utf8");
+      return res.json({ ok: true, message: "Arquivo cookies.txt salvo com sucesso." });
+    }
+    return res.status(400).json({ error: "Envie um arquivo .txt de cookies ou cole o conteúdo no formulário." });
+  }
+  res.json({ ok: true, message: "Arquivo cookies.txt enviado com sucesso." });
+});
+
+app.delete("/api/settings/cookies", (_, res) => {
+  const cPath = path.join(DATA_DIR, "cookies.txt");
+  if (fs.existsSync(cPath)) {
+    try { fs.unlinkSync(cPath); } catch {}
+  }
+  res.json({ ok: true, message: "Cookies removidos." });
 });
 
 // Multi-Key Pool Management (unlimited keys across Groq, Gemini, OpenAI, OpenRouter)

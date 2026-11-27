@@ -194,6 +194,21 @@ export const api = {
       body: JSON.stringify(body)
     }),
 
+  getCookiesStatus: () =>
+    req<{ hasCookies: boolean; sizeBytes: number; modifiedAt: string | null }>("/api/settings/cookies"),
+  uploadCookiesFile: (file: File) => {
+    const fd = new FormData();
+    fd.append("cookies", file);
+    return req<{ ok: boolean; message: string }>("/api/settings/cookies", { method: "POST", body: fd });
+  },
+  uploadCookiesText: (cookiesText: string) =>
+    req<{ ok: boolean; message: string }>("/api/settings/cookies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cookiesText })
+    }),
+  deleteCookies: () => req<{ ok: boolean; message: string }>("/api/settings/cookies", { method: "DELETE" }),
+
   getApiKeys: () => req<{ keys: ApiKeyItem[] }>("/api/keys"),
   addApiKeys: (body: { provider: string; label?: string; model?: string; capabilities?: string; keysText: string }) =>
     req<{ ok: boolean; added: number; keys: ApiKeyItem[] }>("/api/keys", {

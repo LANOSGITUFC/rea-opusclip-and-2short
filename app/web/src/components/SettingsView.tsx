@@ -28,13 +28,22 @@ export const SettingsView: React.FC = () => {
   const [keysText, setKeysText] = useState("");
   const [addedMsg, setAddedMsg] = useState("");
 
+  // YouTube Cookies state
+  const [cookiesStatus, setCookiesStatus] = useState<{ hasCookies: boolean; sizeBytes: number; modifiedAt: string | null } | null>(null);
+  const [cookiesMsg, setCookiesMsg] = useState("");
+
   const loadAll = async () => {
     setLoading(true);
     setErr(null);
     try {
-      const [s, k] = await Promise.all([api.getSettings(), api.getApiKeys()]);
+      const [s, k, cs] = await Promise.all([
+        api.getSettings(),
+        api.getApiKeys(),
+        api.getCookiesStatus().catch(() => ({ hasCookies: false, sizeBytes: 0, modifiedAt: null }))
+      ]);
       setSettings(s);
       setKeys(k.keys);
+      setCookiesStatus(cs);
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "Erro ao carregar configurações.");
     } finally {
@@ -363,6 +372,72 @@ export const SettingsView: React.FC = () => {
             className="w-full px-3 py-2 rounded-xl bg-[#090d16] border border-slate-700 text-white"
           />
         </label>
+
+        {/* YouTube Cookies (.txt) Upload Section */}
+        <div className="p-4 rounded-xl bg-[#090d16] border border-slate-800 space-y-3 text-xs">
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="font-bold text-white block">🍪 YouTube Cookies (cookies.txt)</span>
+              <p className="text-[11px] text-slate-400">
+                Evita o bloqueio "Sign in to confirm you're not a bot" ao baixar certos vídeos ou lives do YouTube.
+              </p>
+            </div>
+            {cookiesStatus?.hasCookies ? (
+              <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 font-bold text-[10px] flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3" /> Ativo ({(cookiesStatus.sizeBytes / 1024).toFixed(1)} KB)
+              </span>
+            ) : (
+              <span className="px-2.5 py-1 rounded-full bg-slate-800 text-slate-400 font-bold text-[10px]">
+                Nenhum cookie enviado
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="px-3 py-1.5 rounded-xl bg-purple-600/20 border border-purple-500/40 text-purple-300 text-xs font-bold cursor-pointer hover:bg-purple-600/30 transition">
+              Selecionar arquivo cookies.txt
+              <input
+                type="file"
+                accept=".txt"
+                className="hidden"
+                onChange={async e => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    await api.uploadCookiesFile(file);
+                    const st = await api.getCookiesStatus();
+                    setCookiesStatus(st);
+                    setCookiesMsg("Arquivo cookies.txt enviado com sucesso!");
+                    setTimeout(() => setCookiesMsg(""), 4000);
+                  } catch (err: unknown) {
+                    setActionErr(err instanceof Error ? err.message : "Erro ao enviar cookies.");
+                  }
+                }}
+              />
+            </label>
+
+            {cookiesStatus?.hasCookies && (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await api.deleteCookies();
+                    const st = await api.getCookiesStatus();
+                    setCookiesStatus(st);
+                    setCookiesMsg("Cookies removidos.");
+                    setTimeout(() => setCookiesMsg(""), 3000);
+                  } catch (err: unknown) {
+                    setActionErr(err instanceof Error ? err.message : "Erro ao remover cookies.");
+                  }
+                }}
+                className="px-3 py-1.5 rounded-xl bg-red-600/20 border border-red-500/40 text-red-300 text-xs font-bold hover:bg-red-600/30 transition"
+              >
+                Remover cookies
+              </button>
+            )}
+            {cookiesMsg && <span className="text-[11px] text-emerald-400 font-semibold">{cookiesMsg}</span>}
+          </div>
+        </div>
 
         <div className="flex items-center justify-between pt-2">
           {saved ? (

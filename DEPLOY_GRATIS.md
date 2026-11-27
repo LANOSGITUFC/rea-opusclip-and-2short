@@ -33,3 +33,12 @@ Abra `http://localhost:3000` no navegador do notebook (ou use `cloudflared tunne
    - **Provedor de LLM:** `Groq (Llama 3.3 70B — Grátis & Ultra Rápido)`
    - **Motor de Transcrição:** `Groq Whisper API (Grátis — 10x rápido)`
 3. Cole sua chave `gsk_...` e clique em **Salvar Configurações**.
+
+---
+
+## Dica: Vídeos do YouTube com Bloqueio de Bot
+Se algum vídeo do YouTube apresentar o aviso *"Sign in to confirm you're not a bot"*:
+1. Vá na aba **Configurações** no Studio.
+2. Na seção **YouTube Cookies**, selecione seu arquivo `cookies.txt` (exportado via extensão de navegador como *Get cookies.txt LOCALLY*).
+3. Ou simplesmente faça o upload direto do arquivo de vídeo (`.mp4`, `.mov`, `.webm`) na tela inicial do Studio!
+

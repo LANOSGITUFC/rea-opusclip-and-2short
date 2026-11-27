@@ -70,28 +70,113 @@ def extract_audio_and_thumb(video_path, out_dir):
     return str(audio_path), str(thumb_path) if thumb_path.exists() else None
 
 
+def _find_youtube_cookies(custom_path=None):
+    """Find any available Netscape cookies.txt file for YouTube authentication."""
+    candidates = []
+    if custom_path and os.path.exists(custom_path):
+        candidates.append(Path(custom_path))
+    env_c = os.environ.get("YOUTUBE_COOKIES_FILE") or os.environ.get("COOKIES_FILE")
+    if env_c and os.path.exists(env_c):
+        candidates.append(Path(env_c))
+    
+    # Check default data / storage locations
+    base = Path(__file__).resolve().parent.parent
+    for check_dir in [base / "data", base.parent / "data", Path("/studio/app/data")]:
+        if check_dir.exists():
+            for f in check_dir.glob("*cookie*.txt"):
+                candidates.append(f)
+            if (check_dir / "cookies.txt").exists():
+                candidates.append(check_dir / "cookies.txt")
+
+    for c in candidates:
+        if c.exists() and c.is_file() and c.stat().st_size > 32:
+            return str(c)
+    return None
+
+
 def cmd_ingest_youtube(args):
     url = args["url"]
     out_dir = Path(args["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
     video_path = out_dir / "source.mp4"
+    cookies_path = _find_youtube_cookies(args.get("cookies_path"))
 
-    # Fetch metadata first
-    meta_proc = run_cmd([
-        "yt-dlp", "--dump-json", "--no-playlist", "--no-warnings", url
-    ])
-    meta = json.loads(meta_proc.stdout.splitlines()[0])
-    title = meta.get("title", "YouTube Video")
-    channel = meta.get("uploader", meta.get("channel", "YouTube"))
+    # Strategies to bypass YouTube "Sign in to confirm you're not a bot" challenge:
+    # 1. Android player client (does not trigger bot wall for most public videos/streams)
+    # 2. Web client with cookies (if cookies.txt is provided)
+    # 3. Standard fallback
+    client_combos = [
+        "android,web",
+        "web,android",
+        "tv_embedded,web",
+        "android_embedded,web"
+    ]
+
+    meta = None
+    meta_err = ""
+    for client in client_combos:
+        cmd = ["yt-dlp", "--dump-json", "--no-playlist", "--no-warnings",
+               "--extractor-args", f"youtube:player_client={client}"]
+        if cookies_path:
+            cmd += ["--cookies", cookies_path]
+        cmd.append(url)
+        proc = run_cmd(cmd, check=False)
+        if proc.returncode == 0 and proc.stdout.strip():
+            try:
+                meta = json.loads(proc.stdout.splitlines()[0])
+                break
+            except Exception:
+                pass
+        else:
+            meta_err = proc.stderr.strip()
+
+    # Fallback to plain oEmbed for title/author if yt-dlp dump-json failed
+    if not meta:
+        title = "YouTube Video"
+        channel = "YouTube"
+        try:
+            oembed_url = f"https://www.youtube.com/oembed?url={urllib.request.quote(url)}&format=json"
+            req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                o_data = json.loads(r.read().decode())
+                title = o_data.get("title", title)
+                channel = o_data.get("author_name", channel)
+        except Exception:
+            pass
+    else:
+        title = meta.get("title", "YouTube Video")
+        channel = meta.get("uploader", meta.get("channel", "YouTube"))
 
     # Download mp4 (max 720p for fast CPU processing on 2 vCPU VM, fallback best)
-    run_cmd([
-        "yt-dlp", "--no-playlist", "--no-warnings",
-        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "-o", str(video_path),
-        url
-    ])
+    download_success = False
+    last_dl_err = ""
+    for client in client_combos:
+        dl_cmd = [
+            "yt-dlp", "--no-playlist", "--no-warnings",
+            "--extractor-args", f"youtube:player_client={client}",
+            "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best",
+            "--merge-output-format", "mp4",
+            "-o", str(video_path),
+        ]
+        if cookies_path:
+            dl_cmd += ["--cookies", cookies_path]
+        dl_cmd.append(url)
+
+        dl_proc = run_cmd(dl_cmd, check=False)
+        if dl_proc.returncode == 0 and video_path.exists() and video_path.stat().st_size > 1024:
+            download_success = True
+            break
+        last_dl_err = dl_proc.stderr.strip() or meta_err
+
+    if not download_success:
+        if "Sign in to confirm you’re not a bot" in last_dl_err or "Sign in to confirm" in last_dl_err:
+            raise RuntimeError(
+                "O YouTube solicitou verificação contra bots para este vídeo. "
+                "Para resolver:\n"
+                "1. Envie o arquivo cookies.txt na aba Configurações (ou coloque em app/data/cookies.txt).\n"
+                "2. Ou faça o upload direto do arquivo de vídeo (MP4/MOV) na tela inicial!"
+            )
+        raise RuntimeError(f"Falha ao baixar vídeo do YouTube ({last_dl_err[-300:] or 'erro desconhecido'}).")
 
     info = ffprobe_info(video_path)
     audio_path, thumb_path = extract_audio_and_thumb(video_path, out_dir)
