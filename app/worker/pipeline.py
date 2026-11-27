@@ -147,6 +147,14 @@ def cmd_ingest_youtube(args):
         title = meta.get("title", "YouTube Video")
         channel = meta.get("uploader", meta.get("channel", "YouTube"))
 
+    # Active YouTube Livestreams (currently on-air) cannot be processed into shorts until finished
+    if meta and (meta.get("is_live") is True or meta.get("live_status") == "is_live"):
+        raise RuntimeError(
+            f"O vídeo \"{title}\" é uma TRANSMISSÃO AO VIVO em andamento no YouTube.\n"
+            "O YouTube não permite processar lives enquanto estiverem no ar. "
+            "Aguarde o criador encerrar a live (para que ela se torne um vídeo gravado) ou envie um vídeo já publicado/gravado!"
+        )
+
     # Download mp4 (max 720p for fast CPU processing on 2 vCPU VM, fallback best)
     download_success = False
     last_dl_err = ""
