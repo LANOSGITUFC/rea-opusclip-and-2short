@@ -29,3 +29,8 @@ app/web/dist/
 *.m4a
 *.wav
 *.ass
+
+# Python bytecode & agent scratch
+__pycache__/
+*.pyc
+.agents/

@@ -94,6 +94,7 @@ export interface Clip {
   exportPath: string;
   exportStatus: "idle" | "rendering" | "done" | "error";
   exportError: string;
+  tracks?: Array<{ type: string; name?: string; filePath?: string; volume?: number; ducking?: boolean }>;
 }
 
 export interface BrandKit {
@@ -134,6 +135,16 @@ export interface PublishSchedule {
   accountName?: string;
   handle?: string;
   clipTitle?: string;
+  publishedUrl?: string;
+  exportStatus?: string;
+}
+
+export interface OAuthConfig {
+  googleConfigured: boolean;
+  googleClientIdPreview: string;
+  tiktokConfigured: boolean;
+  metaConfigured: boolean;
+  redirectUris: { youtube: string; tiktok: string; instagram: string };
 }
 
 export interface Settings {
@@ -241,6 +252,21 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ resolution, fps })
     }),
+  uploadBgm: (clipId: string, file: File, volume = 0.22, ducking = true) => {
+    const fd = new FormData();
+    fd.append("audio", file);
+    fd.append("volume", String(volume));
+    fd.append("ducking", String(ducking));
+    return req<{ clip: Clip }>(`/api/clips/${clipId}/bgm`, { method: "POST", body: fd });
+  },
+  removeBgm: (clipId: string) =>
+    req<{ clip: Clip }>(`/api/clips/${clipId}/bgm`, { method: "DELETE" }),
+  translateClip: (clipId: string, targetLang: string) =>
+    req<{ words: Clip["words"] }>(`/api/clips/${clipId}/translate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targetLang })
+    }),
 
   getBrandKits: () => req<{ kits: BrandKit[] }>("/api/brand-kits"),
   createBrandKit: (fd: FormData) => req<{ kit: BrandKit }>("/api/brand-kits", { method: "POST", body: fd }),
@@ -270,7 +296,20 @@ export const api = {
       body: JSON.stringify(body)
     }),
   publishNow: (id: string) => req<{ status: string; error?: string }>(`/api/publish-schedules/${id}/publish-now`, { method: "POST" }),
-  deleteSchedule: (id: string) => req<{ ok: boolean }>(`/api/publish-schedules/${id}`, { method: "DELETE" })
+  deleteSchedule: (id: string) => req<{ ok: boolean }>(`/api/publish-schedules/${id}`, { method: "DELETE" }),
+
+  getOAuthConfig: () => req<OAuthConfig>("/api/oauth/config"),
+  saveOAuthConfig: (body: Record<string, string>) =>
+    req<{ ok: boolean }>("/api/oauth/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }),
+  uploadGoogleOAuthSecret: (formData: FormData) =>
+    req<{ ok: boolean; clientId?: string }>("/api/oauth/google/upload-secret", {
+      method: "POST",
+      body: formData
+    })
 };
 
 export function fmtTime(sec: number): string {

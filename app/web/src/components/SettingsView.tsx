@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api, ApiKeyItem, Settings } from "../api";
-import { KeyRound, Save, CheckCircle2, ShieldCheck, Plus, Trash2, RefreshCw, Zap, AlertTriangle } from "lucide-react";
+import { KeyRound, Save, CheckCircle2, ShieldCheck, Plus, Trash2, RefreshCw, Zap, AlertTriangle, AlertCircle, Loader2 } from "lucide-react";
 
 const PROVIDER_BADGE: Record<string, string> = {
   groq: "bg-orange-500/20 text-orange-300 border-orange-500/40",
@@ -14,6 +14,12 @@ export const SettingsView: React.FC = () => {
   const [keys, setKeys] = useState<ApiKeyItem[]>([]);
   const [saved, setSaved] = useState(false);
 
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  const [savingPrefs, setSavingPrefs] = useState(false);
+  const [addingKeys, setAddingKeys] = useState(false);
+
   // Add keys form (supports 1 or bulk paste — 1 per line)
   const [newProvider, setNewProvider] = useState("auto");
   const [newLabel, setNewLabel] = useState("");
@@ -23,53 +29,121 @@ export const SettingsView: React.FC = () => {
   const [addedMsg, setAddedMsg] = useState("");
 
   const loadAll = async () => {
-    const [s, k] = await Promise.all([api.getSettings(), api.getApiKeys()]);
-    setSettings(s);
-    setKeys(k.keys);
+    setLoading(true);
+    setErr(null);
+    try {
+      const [s, k] = await Promise.all([api.getSettings(), api.getApiKeys()]);
+      setSettings(s);
+      setKeys(k.keys);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Erro ao carregar configurações.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
     loadAll();
   }, []);
 
+  if (loading && !settings) {
+    return (
+      <div className="py-16 flex justify-center">
+        <Loader2 className="w-6 h-6 text-purple-400 animate-spin" />
+      </div>
+    );
+  }
+
+  if (err && !settings) {
+    return (
+      <div className="max-w-md mx-auto my-12 bg-[#111827] border border-red-500/30 rounded-2xl p-6 text-center space-y-4">
+        <AlertCircle className="w-8 h-8 text-red-400 mx-auto" />
+        <div className="space-y-1">
+          <h3 className="text-sm font-bold text-white">Não foi possível carregar as configurações</h3>
+          <p className="text-xs text-red-300">{err}</p>
+        </div>
+        <button
+          onClick={loadAll}
+          className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold inline-flex items-center gap-1.5"
+        >
+          <RefreshCw className="w-3.5 h-3.5" /> Tentar novamente
+        </button>
+      </div>
+    );
+  }
+
   if (!settings) return null;
 
   const handleAddKeys = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!keysText.trim()) return;
-    const r = await api.addApiKeys({
-      provider: newProvider,
-      label: newLabel.trim(),
-      model: newModel.trim(),
-      capabilities: newCaps,
-      keysText
-    });
-    setKeys(r.keys);
-    setKeysText("");
-    setNewLabel("");
-    setAddedMsg(`${r.added} chave(s) adicionada(s) ao pool de rotação!`);
-    setTimeout(() => setAddedMsg(""), 3500);
+    if (!keysText.trim() || addingKeys) return;
+    setAddingKeys(true);
+    setActionErr(null);
+    try {
+      const r = await api.addApiKeys({
+        provider: newProvider,
+        label: newLabel.trim(),
+        model: newModel.trim(),
+        capabilities: newCaps,
+        keysText
+      });
+      setKeys(r.keys);
+      setKeysText("");
+      setNewLabel("");
+      setAddedMsg(`${r.added} chave(s) adicionada(s) ao pool de rotação!`);
+      setTimeout(() => setAddedMsg(""), 3500);
+    } catch (e: unknown) {
+      setActionErr(e instanceof Error ? e.message : "Erro ao adicionar chaves.");
+    } finally {
+      setAddingKeys(false);
+    }
+  };
+
+  const handleKeyAction = async (fn: () => Promise<{ keys: ApiKeyItem[] }>) => {
+    setActionErr(null);
+    try {
+      const r = await fn();
+      setKeys(r.keys);
+    } catch (e: unknown) {
+      setActionErr(e instanceof Error ? e.message : "Erro ao atualizar chave.");
+    }
   };
 
   const handleSavePrefs = async (e: React.FormEvent) => {
     e.preventDefault();
-    const res = await api.saveSettings({
-      llmProvider: settings.llmProvider,
-      llmModel: settings.llmModel,
-      whisperProvider: settings.whisperProvider,
-      whisperModel: settings.whisperModel,
-      defaultLanguage: settings.defaultLanguage,
-      socialCopyPrompt: settings.socialCopyPrompt
-    });
-    setSettings(res.settings);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
+    if (savingPrefs) return;
+    setSavingPrefs(true);
+    setActionErr(null);
+    try {
+      const res = await api.saveSettings({
+        llmProvider: settings.llmProvider,
+        llmModel: settings.llmModel,
+        whisperProvider: settings.whisperProvider,
+        whisperModel: settings.whisperModel,
+        giphyApiKey: settings.giphyApiKey,
+        defaultLanguage: settings.defaultLanguage,
+        socialCopyPrompt: settings.socialCopyPrompt
+      });
+      setSettings(res.settings);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch (e: unknown) {
+      setActionErr(e instanceof Error ? e.message : "Erro ao salvar preferências.");
+    } finally {
+      setSavingPrefs(false);
+    }
   };
 
   const nowIso = new Date().toISOString();
 
   return (
     <div className="max-w-3xl mx-auto space-y-6 pb-20">
+      {actionErr && (
+        <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2"><AlertCircle className="w-4 h-4 shrink-0" /> {actionErr}</span>
+          <button type="button" onClick={() => setActionErr(null)} className="text-slate-400 hover:text-white text-xs">✕</button>
+        </div>
+      )}
       {/* MULTI-KEY POOL CARD */}
       <section className="bg-[#111827] border border-slate-800 rounded-2xl p-5 space-y-4">
         <div className="flex items-start justify-between flex-wrap gap-2">
@@ -122,8 +196,9 @@ export const SettingsView: React.FC = () => {
             ) : (
               <span className="text-[11px] text-slate-500">Salvo somente no SQLite local (nunca vai para o GitHub).</span>
             )}
-            <button type="submit" disabled={!keysText.trim()} className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold flex items-center gap-1.5 disabled:opacity-50">
-              <Plus className="w-3.5 h-3.5" /> Adicionar ao Pool
+            <button type="submit" disabled={addingKeys || !keysText.trim()} className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold flex items-center gap-1.5 disabled:opacity-50">
+              {addingKeys ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+              {addingKeys ? "Adicionando..." : "Adicionar ao Pool"}
             </button>
           </div>
         </form>
@@ -159,7 +234,8 @@ export const SettingsView: React.FC = () => {
                   <div className="flex items-center gap-1.5">
                     {inCooldown && (
                       <button
-                        onClick={async () => { const r = await api.updateApiKey(k.id, { resetCooldown: true }); setKeys(r.keys); }}
+                        type="button"
+                        onClick={() => handleKeyAction(() => api.updateApiKey(k.id, { resetCooldown: true }))}
                         className="px-2 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-[10px] font-bold flex items-center gap-1"
                         title="Liberar cooldown agora"
                       >
@@ -167,7 +243,8 @@ export const SettingsView: React.FC = () => {
                       </button>
                     )}
                     <button
-                      onClick={async () => { const r = await api.updateApiKey(k.id, { enabled: !k.enabled }); setKeys(r.keys); }}
+                      type="button"
+                      onClick={() => handleKeyAction(() => api.updateApiKey(k.id, { enabled: !k.enabled }))}
                       className={`px-2.5 py-1 rounded-lg text-[10px] font-bold ${
                         k.enabled ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-800 text-slate-400"
                       }`}
@@ -175,9 +252,11 @@ export const SettingsView: React.FC = () => {
                       {k.enabled ? "Ativa" : "Pausada"}
                     </button>
                     <button
-                      onClick={async () => { const r = await api.deleteApiKey(k.id); setKeys(r.keys); }}
+                      type="button"
+                      onClick={() => handleKeyAction(() => api.deleteApiKey(k.id))}
                       className="p-1.5 text-slate-500 hover:text-red-400"
                       title="Remover chave"
+                      aria-label={`Remover chave ${k.label}`}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -239,6 +318,42 @@ export const SettingsView: React.FC = () => {
           </label>
         </div>
 
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <label className="space-y-1">
+            <span className="font-bold text-slate-300">Modelo LLM (Override)</span>
+            <input
+              value={settings.llmModel || ""}
+              onChange={e => setSettings({ ...settings, llmModel: e.target.value })}
+              placeholder="ex: llama-3.3-70b-versatile"
+              className="w-full px-3 py-2.5 rounded-xl bg-[#090d16] border border-slate-700 text-white"
+            />
+          </label>
+
+          <label className="space-y-1">
+            <span className="font-bold text-slate-300">Modelo Whisper Local</span>
+            <select
+              value={settings.whisperModel || "base"}
+              onChange={e => setSettings({ ...settings, whisperModel: e.target.value as Settings["whisperModel"] })}
+              className="w-full px-3 py-2.5 rounded-xl bg-[#090d16] border border-slate-700 text-white"
+            >
+              <option value="tiny">tiny (Mais rápido)</option>
+              <option value="base">base (Equilibrado)</option>
+              <option value="small">small (Maior precisão)</option>
+            </select>
+          </label>
+
+          <label className="space-y-1">
+            <span className="font-bold text-slate-300">Giphy API Key (B-Roll / GIFs)</span>
+            <input
+              type="password"
+              value={settings.giphyApiKey || ""}
+              onChange={e => setSettings({ ...settings, giphyApiKey: e.target.value })}
+              placeholder="Opcional"
+              className="w-full px-3 py-2.5 rounded-xl bg-[#090d16] border border-slate-700 text-white"
+            />
+          </label>
+        </div>
+
         <label className="block space-y-1 text-xs">
           <span className="font-bold text-slate-300">Prompt Padrão do PlanSocial (Copy das Redes)</span>
           <textarea
@@ -255,8 +370,9 @@ export const SettingsView: React.FC = () => {
               <CheckCircle2 className="w-4 h-4" /> Preferências salvas!
             </span>
           ) : <span />}
-          <button type="submit" className="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-2">
-            <Save className="w-4 h-4" /> Salvar Preferências
+          <button type="submit" disabled={savingPrefs} className="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-2 disabled:opacity-50">
+            {savingPrefs ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+            {savingPrefs ? "Salvando..." : "Salvar Preferências"}
           </button>
         </div>
       </form>

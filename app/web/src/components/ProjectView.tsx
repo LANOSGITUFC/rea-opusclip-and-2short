@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api, Clip, fmtTime, ProjectSummary } from "../api";
-import { ArrowLeft, Heart, Scissors, Calendar, MessageSquare, Send, Sparkles, Loader2, Download } from "lucide-react";
+import { ArrowLeft, Heart, Scissors, Calendar, MessageSquare, Send, Sparkles, Loader2, Download, AlertCircle, RefreshCw } from "lucide-react";
 
 interface Props {
   projectId: string;
@@ -16,17 +16,31 @@ export const ProjectView: React.FC<Props> = ({ projectId, onBack, onEditClip, on
   const [sort, setSort] = useState<"score" | "order" | "short">("score");
   const [search, setSearch] = useState("");
 
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+
   // Project Chat state
   const [messages, setMessages] = useState<Array<{ id: string; role: "user" | "assistant"; content: string }>>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
 
   const load = async () => {
-    const r = await api.getProject(projectId);
-    setProject(r.project);
-    setClips(r.clips);
-    const ch = await api.getProjectChat(projectId);
-    setMessages(ch.messages);
+    setLoading(true);
+    setErr(null);
+    try {
+      const [r, ch] = await Promise.all([
+        api.getProject(projectId),
+        api.getProjectChat(projectId)
+      ]);
+      setProject(r.project);
+      setClips(r.clips);
+      setMessages(ch.messages);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Erro ao carregar projeto.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -34,18 +48,28 @@ export const ProjectView: React.FC<Props> = ({ projectId, onBack, onEditClip, on
   }, [projectId]);
 
   const toggleLike = async (c: Clip) => {
-    const r = await api.updateClip(c.id, { liked: !c.liked });
-    setClips(prev => prev.map(x => (x.id === c.id ? r.clip : x)));
+    setActionErr(null);
+    try {
+      const r = await api.updateClip(c.id, { liked: !c.liked });
+      setClips(prev => prev.map(x => (x.id === c.id ? r.clip : x)));
+    } catch (e: unknown) {
+      setActionErr(e instanceof Error ? e.message : "Erro ao atualizar favorito.");
+    }
   };
 
   const sendChat = async (text: string) => {
     if (!text.trim() || chatLoading) return;
     setChatLoading(true);
-    setMessages(prev => [...prev, { id: `tmp-${Date.now()}`, role: "user", content: text }]);
+    setActionErr(null);
+    const tmpId = `tmp-${Date.now()}`;
+    setMessages(prev => [...prev, { id: tmpId, role: "user", content: text }]);
     setChatInput("");
     try {
       const r = await api.sendProjectChat(projectId, text);
       setMessages(prev => [...prev, r.reply]);
+    } catch (e: unknown) {
+      setMessages(prev => prev.filter(m => m.id !== tmpId));
+      setActionErr(e instanceof Error ? e.message : "Erro ao enviar mensagem para o Copiloto.");
     } finally {
       setChatLoading(false);
     }
@@ -59,13 +83,41 @@ export const ProjectView: React.FC<Props> = ({ projectId, onBack, onEditClip, on
       return b.viralityScore - a.viralityScore;
     });
 
-  if (!project) {
+  if (loading && !project) {
     return (
       <div className="py-16 flex justify-center">
         <Loader2 className="w-6 h-6 text-purple-400 animate-spin" />
       </div>
     );
   }
+
+  if (err && !project) {
+    return (
+      <div className="max-w-md mx-auto my-12 bg-[#111827] border border-red-500/30 rounded-2xl p-6 text-center space-y-4">
+        <AlertCircle className="w-8 h-8 text-red-400 mx-auto" />
+        <div className="space-y-1">
+          <h3 className="text-sm font-bold text-white">Não foi possível carregar o projeto</h3>
+          <p className="text-xs text-red-300">{err}</p>
+        </div>
+        <div className="flex items-center justify-center gap-2">
+          <button
+            onClick={onBack}
+            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" /> Voltar
+          </button>
+          <button
+            onClick={load}
+            className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-1.5"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Tentar novamente
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!project) return null;
 
   return (
     <div className="space-y-4 pb-20">
@@ -102,6 +154,13 @@ export const ProjectView: React.FC<Props> = ({ projectId, onBack, onEditClip, on
           </button>
         </div>
       </div>
+
+      {actionErr && (
+        <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2"><AlertCircle className="w-4 h-4 shrink-0" /> {actionErr}</span>
+          <button onClick={() => setActionErr(null)} className="text-slate-400 hover:text-white text-xs">✕</button>
+        </div>
+      )}
 
       {tab === "clips" ? (
         <>

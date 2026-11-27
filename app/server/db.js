@@ -2,8 +2,7 @@ const path = require("path");
 const fs = require("fs");
 const { DatabaseSync } = require("node:sqlite");
 
-const DATA_DIR = path.resolve(__dirname, "../data");
-fs.mkdirSync(DATA_DIR, { recursive: true });
+const { DATA_DIR } = require("./paths");
 
 const DB_PATH = path.join(DATA_DIR, "studio.db");
 const db = new DatabaseSync(DB_PATH);
@@ -11,6 +10,7 @@ const db = new DatabaseSync(DB_PATH);
 db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA foreign_keys = ON;
+  PRAGMA busy_timeout = 5000;
 
   CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -240,6 +240,52 @@ function recordKeyError(id, statusCode, message) {
   `).run(String(message || "Erro na API").slice(0, 220), until, id);
 }
 
+function upsertSocialAccount({ id, platform, accountName, handle = "", profileUrl = "", scopesJson = "[]", accessToken = "", refreshToken = "" }) {
+  const existing = handle
+    ? db.prepare("SELECT * FROM social_accounts WHERE platform = ? AND (handle = ? OR accountName = ?) LIMIT 1").get(platform, handle, accountName)
+    : db.prepare("SELECT * FROM social_accounts WHERE platform = ? AND accountName = ? LIMIT 1").get(platform, accountName);
+
+  if (existing) {
+    db.prepare(`
+      UPDATE social_accounts
+      SET accountName = ?,
+          handle = ?,
+          profileUrl = ?,
+          scopesJson = ?,
+          accessToken = ?,
+          refreshToken = CASE WHEN ? != '' THEN ? ELSE refreshToken END,
+          enabled = 1
+      WHERE id = ?
+    `).run(
+      accountName,
+      handle,
+      profileUrl || existing.profileUrl || "",
+      scopesJson,
+      accessToken,
+      refreshToken || "",
+      refreshToken || "",
+      existing.id
+    );
+    return existing.id;
+  }
+
+  db.prepare(`
+    INSERT INTO social_accounts (id, platform, accountName, handle, profileUrl, scopesJson, accessToken, refreshToken, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    platform,
+    accountName,
+    handle,
+    profileUrl,
+    scopesJson,
+    accessToken,
+    refreshToken,
+    new Date().toISOString()
+  );
+  return id;
+}
+
 module.exports = {
   db,
   getSettings,
@@ -247,5 +293,6 @@ module.exports = {
   listApiKeys,
   getActiveKeysFor,
   recordKeySuccess,
-  recordKeyError
+  recordKeyError,
+  upsertSocialAccount
 };

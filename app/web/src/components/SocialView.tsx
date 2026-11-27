@@ -1,14 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { api, Clip, PublishSchedule, SocialAccount } from "../api";
-import { Calendar, Trash2, Sparkles, Send, CheckCircle2, AlertCircle, Upload, ExternalLink, KeyRound } from "lucide-react";
-
-interface OAuthConfig {
-  googleConfigured: boolean;
-  googleClientIdPreview: string;
-  tiktokConfigured: boolean;
-  metaConfigured: boolean;
-  redirectUris: { youtube: string; tiktok: string; instagram: string };
-}
+import { api, Clip, OAuthConfig, PublishSchedule, SocialAccount } from "../api";
+import { Calendar, Trash2, Sparkles, Send, CheckCircle2, AlertCircle, Upload, ExternalLink, KeyRound, Loader2 } from "lucide-react";
 
 interface Props {
   preselectedClip?: Clip | null;
@@ -20,6 +12,10 @@ export const SocialView: React.FC<Props> = ({ preselectedClip }) => {
   const [oauth, setOauth] = useState<OAuthConfig | null>(null);
   const [showOAuthSetup, setShowOAuthSetup] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
+  const [errMsg, setErrMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirmDeleteAccountId, setConfirmDeleteAccountId] = useState<string | null>(null);
+  const [confirmDeleteScheduleId, setConfirmDeleteScheduleId] = useState<string | null>(null);
 
   // TikTok / Meta manual credentials
   const [tiktokKey, setTiktokKey] = useState("");
@@ -34,71 +30,91 @@ export const SocialView: React.FC<Props> = ({ preselectedClip }) => {
   const [schedTags, setSchedTags] = useState(preselectedClip?.hashtags || "");
   const [schedTime, setSchedTime] = useState(new Date(Date.now() + 3600_000).toISOString().slice(0, 16));
   const [copyBusy, setCopyBusy] = useState(false);
+  const [schedBusy, setSchedBusy] = useState(false);
 
   const load = async () => {
-    const [a, s, o] = await Promise.all([
-      api.getSocialAccounts(),
-      api.getSchedules(),
-      fetch("/api/oauth/config").then(r => r.json())
-    ]);
-    setAccounts(a.accounts);
-    setSchedules(s.schedules);
-    setOauth(o);
-    if (!schedAccountId && a.accounts.length > 0) setSchedAccountId(a.accounts[0].id);
+    try {
+      const [a, s, o] = await Promise.all([
+        api.getSocialAccounts(),
+        api.getSchedules(),
+        api.getOAuthConfig()
+      ]);
+      setAccounts(a.accounts);
+      setSchedules(s.schedules);
+      setOauth(o);
+      if (!schedAccountId && a.accounts.length > 0) setSchedAccountId(a.accounts[0].id);
+    } catch (e: unknown) {
+      setErrMsg(e instanceof Error ? e.message : "Erro ao carregar contas e agendamentos.");
+    }
   };
 
   useEffect(() => {
     load();
     const params = new URLSearchParams(window.location.search);
-    if (params.get("oauth") === "success") {
-      setStatusMsg(`✅ Conta ${params.get("platform")} conectada com sucesso via OAuth!`);
-    } else if (params.get("oauth") === "error") {
-      setStatusMsg(`❌ Erro no OAuth: ${params.get("msg")}`);
+    if (params.has("oauth")) {
+      if (params.get("oauth") === "success") {
+        setStatusMsg(`Conta ${params.get("platform") || ""} conectada com sucesso via OAuth!`);
+      } else if (params.get("oauth") === "error") {
+        setErrMsg(`Erro no OAuth: ${params.get("msg") || "Falha na autenticação"}`);
+      }
+      window.history.replaceState({}, "", window.location.pathname);
     }
   }, []);
 
   const handleUploadGoogleSecret = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const fd = new FormData();
-    fd.append("file", file);
-    const res = await fetch("/api/oauth/google/upload-secret", { method: "POST", body: fd });
-    const data = await res.json();
-    if (!res.ok) {
-      setStatusMsg(`❌ ${data.error}`);
-    } else {
-      setStatusMsg("✅ client_secret.json do Google Cloud salvo! Agora clique em 'Login com YouTube'.");
+    setBusy(true);
+    setErrMsg("");
+    setStatusMsg("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      await api.uploadGoogleOAuthSecret(fd);
+      setStatusMsg("client_secret.json do Google Cloud salvo! Agora clique em 'Login com YouTube'.");
       await load();
+    } catch (err: unknown) {
+      setErrMsg(err instanceof Error ? err.message : "Erro ao enviar client_secret.json.");
+    } finally {
+      setBusy(false);
+      e.target.value = "";
     }
-    e.target.value = "";
   };
 
   const handleSaveOtherOAuth = async (e: React.FormEvent) => {
     e.preventDefault();
-    await fetch("/api/oauth/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    setBusy(true);
+    setErrMsg("");
+    setStatusMsg("");
+    try {
+      await api.saveOAuthConfig({
         tiktokClientKey: tiktokKey,
         tiktokClientSecret: tiktokSecret,
         metaAppId: metaId,
         metaAppSecret: metaSecret
-      })
-    });
-    setStatusMsg("✅ Credenciais OAuth salvas!");
-    setTiktokKey(""); setTiktokSecret(""); setMetaId(""); setMetaSecret("");
-    await load();
+      });
+      setStatusMsg("Credenciais OAuth salvas!");
+      setTiktokKey(""); setTiktokSecret(""); setMetaId(""); setMetaSecret("");
+      await load();
+    } catch (err: unknown) {
+      setErrMsg(err instanceof Error ? err.message : "Erro ao salvar credenciais OAuth.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const handleGenCopy = async () => {
     if (!preselectedClip) return;
     setCopyBusy(true);
+    setErrMsg("");
     try {
       const acc = accounts.find(a => a.id === schedAccountId);
       const r = await api.generateSocialCopy(preselectedClip.id, acc?.platform || "YOUTUBE");
       setSchedTitle(r.copy.title);
       setSchedDesc(r.copy.description);
       setSchedTags(r.copy.hashtags);
+    } catch (e: unknown) {
+      setErrMsg(e instanceof Error ? e.message : "Erro ao gerar copy com IA.");
     } finally {
       setCopyBusy(false);
     }
@@ -106,25 +122,91 @@ export const SocialView: React.FC<Props> = ({ preselectedClip }) => {
 
   const handleSchedule = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!preselectedClip) return;
-    const acc = accounts.find(a => a.id === schedAccountId);
-    await api.createSchedule({
-      clipId: preselectedClip.id,
-      accountId: schedAccountId,
-      platform: acc?.platform || "YOUTUBE",
-      title: schedTitle,
-      description: schedDesc,
-      hashtags: schedTags,
-      scheduledAt: new Date(schedTime).toISOString()
-    });
-    await load();
+    setErrMsg("");
+    setStatusMsg("");
+    if (!preselectedClip?.id) {
+      setErrMsg("Selecione um clipe válido antes de agendar.");
+      return;
+    }
+    if (!schedAccountId) {
+      setErrMsg("Selecione uma conta social conectada para agendar.");
+      return;
+    }
+    const parsedDate = new Date(schedTime);
+    if (!schedTime || Number.isNaN(parsedDate.getTime())) {
+      setErrMsg("Informe uma data e hora válidas para o agendamento.");
+      return;
+    }
+    setSchedBusy(true);
+    try {
+      const acc = accounts.find(a => a.id === schedAccountId);
+      await api.createSchedule({
+        clipId: preselectedClip.id,
+        accountId: schedAccountId,
+        platform: acc?.platform || "YOUTUBE",
+        title: schedTitle.trim() || preselectedClip.title,
+        description: schedDesc,
+        hashtags: schedTags,
+        scheduledAt: parsedDate.toISOString()
+      });
+      setStatusMsg("Publicação agendada com sucesso!");
+      await load();
+    } catch (err: unknown) {
+      setErrMsg(err instanceof Error ? err.message : "Erro ao agendar publicação.");
+    } finally {
+      setSchedBusy(false);
+    }
+  };
+
+  const handleDeleteAccount = async (id: string) => {
+    setErrMsg("");
+    try {
+      await api.deleteSocialAccount(id);
+      setConfirmDeleteAccountId(null);
+      setStatusMsg("Conta social desconectada.");
+      await load();
+    } catch (e: unknown) {
+      setErrMsg(e instanceof Error ? e.message : "Erro ao remover conta social.");
+    }
+  };
+
+  const handlePublishNow = async (id: string) => {
+    setErrMsg("");
+    setStatusMsg("");
+    try {
+      const res = await api.publishNow(id);
+      if (res.error) setErrMsg(res.error);
+      else setStatusMsg("Publicação disparada!");
+      await load();
+    } catch (e: unknown) {
+      setErrMsg(e instanceof Error ? e.message : "Erro ao publicar agora.");
+    }
+  };
+
+  const handleDeleteSchedule = async (id: string) => {
+    setErrMsg("");
+    try {
+      await api.deleteSchedule(id);
+      setConfirmDeleteScheduleId(null);
+      setStatusMsg("Agendamento removido.");
+      await load();
+    } catch (e: unknown) {
+      setErrMsg(e instanceof Error ? e.message : "Erro ao remover agendamento.");
+    }
   };
 
   return (
     <div className="space-y-6 pb-20">
+      {errMsg && (
+        <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-xs font-semibold text-red-400 flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2"><AlertCircle className="w-4 h-4 shrink-0" /> {errMsg}</span>
+          <button onClick={() => setErrMsg("")} className="text-slate-400 hover:text-white text-xs">✕</button>
+        </div>
+      )}
       {statusMsg && (
-        <div className="p-3 rounded-xl bg-purple-500/15 border border-purple-500/30 text-xs font-semibold text-white">
-          {statusMsg}
+        <div className="p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 shrink-0" /> {statusMsg}</span>
+          <button onClick={() => setStatusMsg("")} className="text-slate-400 hover:text-white text-xs">✕</button>
         </div>
       )}
 
@@ -257,8 +339,8 @@ export const SocialView: React.FC<Props> = ({ preselectedClip }) => {
               <input value={tiktokSecret} onChange={e => setTiktokSecret(e.target.value)} placeholder="TikTok Client Secret" type="password" className="px-3 py-2 rounded-xl bg-[#111827] border border-slate-700 text-white" />
               <input value={metaId} onChange={e => setMetaId(e.target.value)} placeholder="Meta (Instagram) App ID" className="px-3 py-2 rounded-xl bg-[#111827] border border-slate-700 text-white" />
               <input value={metaSecret} onChange={e => setMetaSecret(e.target.value)} placeholder="Meta App Secret" type="password" className="px-3 py-2 rounded-xl bg-[#111827] border border-slate-700 text-white" />
-              <button type="submit" className="sm:col-span-2 py-2 rounded-xl bg-purple-600 text-white font-bold">
-                Salvar Credenciais TikTok / Meta
+              <button type="submit" disabled={busy} className="sm:col-span-2 py-2 rounded-xl bg-purple-600 text-white font-bold disabled:opacity-50">
+                {busy ? "Salvando..." : "Salvar Credenciais TikTok / Meta"}
               </button>
             </form>
           </div>
@@ -276,9 +358,34 @@ export const SocialView: React.FC<Props> = ({ preselectedClip }) => {
                   </div>
                   <div className="text-[11px] text-slate-400">{a.platform} {a.handle ? `• ${a.handle}` : ""}</div>
                 </div>
-                <button onClick={async () => { await api.deleteSocialAccount(a.id); load(); }} className="text-slate-500 hover:text-red-400 p-1">
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+                {confirmDeleteAccountId === a.id ? (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteAccount(a.id)}
+                      className="px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold"
+                    >
+                      Confirmar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteAccountId(null)}
+                      className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold"
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteAccountId(a.id)}
+                    className="text-slate-500 hover:text-red-400 p-1"
+                    title="Desconectar conta"
+                    aria-label={`Desconectar ${a.accountName}`}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -304,8 +411,9 @@ export const SocialView: React.FC<Props> = ({ preselectedClip }) => {
           <input value={schedTitle} onChange={e => setSchedTitle(e.target.value)} placeholder="Título da postagem" className="w-full px-3 py-2 rounded-xl bg-[#090d16] border border-slate-700 text-white" />
           <textarea rows={2} value={schedDesc} onChange={e => setSchedDesc(e.target.value)} placeholder="Descrição..." className="w-full px-3 py-2 rounded-xl bg-[#090d16] border border-slate-700 text-white" />
           <input value={schedTags} onChange={e => setSchedTags(e.target.value)} placeholder="#hashtags" className="w-full px-3 py-2 rounded-xl bg-[#090d16] border border-slate-700 text-white" />
-          <button type="submit" className="px-5 py-2.5 rounded-xl bg-emerald-500 text-black font-black flex items-center gap-1.5">
-            <Calendar className="w-4 h-4" /> Confirmar Agendamento
+          <button type="submit" disabled={schedBusy} className="px-5 py-2.5 rounded-xl bg-emerald-500 text-black font-black flex items-center gap-1.5 disabled:opacity-50">
+            {schedBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Calendar className="w-4 h-4" />}
+            {schedBusy ? "Agendando..." : "Confirmar Agendamento"}
           </button>
         </form>
       )}
@@ -324,9 +432,9 @@ export const SocialView: React.FC<Props> = ({ preselectedClip }) => {
                   <div className="text-[11px] text-slate-400">
                     {s.platform} {s.accountName ? `(${s.accountName})` : ""} • {new Date(s.scheduledAt).toLocaleString("pt-BR")}
                   </div>
-                  {(s as any).publishedUrl && (
-                    <a href={(s as any).publishedUrl} target="_blank" rel="noreferrer" className="text-[11px] text-emerald-400 underline flex items-center gap-1">
-                      <ExternalLink className="w-3 h-3" /> {(s as any).publishedUrl}
+                  {s.publishedUrl && (
+                    <a href={s.publishedUrl} target="_blank" rel="noreferrer" className="text-[11px] text-emerald-400 underline flex items-center gap-1">
+                      <ExternalLink className="w-3 h-3" /> {s.publishedUrl}
                     </a>
                   )}
                   {s.errorMsg && (
@@ -340,14 +448,39 @@ export const SocialView: React.FC<Props> = ({ preselectedClip }) => {
                     {s.status}
                   </span>
                   {s.status !== "PUBLISHED" && (
-                    <button onClick={async () => { await api.publishNow(s.id); load(); }} className="px-2.5 py-1 rounded-lg bg-purple-600 text-white font-bold flex items-center gap-1">
+                    <button type="button" onClick={() => handlePublishNow(s.id)} className="px-2.5 py-1 rounded-lg bg-purple-600 text-white font-bold flex items-center gap-1">
                       <Send className="w-3 h-3" /> Publicar Agora
                     </button>
                   )}
                   {s.status === "PUBLISHED" && <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
-                  <button onClick={async () => { await api.deleteSchedule(s.id); load(); }} className="text-slate-500 hover:text-red-400 p-1">
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                  {confirmDeleteScheduleId === s.id ? (
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteSchedule(s.id)}
+                        className="px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold"
+                      >
+                        Confirmar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmDeleteScheduleId(null)}
+                        className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteScheduleId(s.id)}
+                      className="text-slate-500 hover:text-red-400 p-1"
+                      title="Excluir agendamento"
+                      aria-label={`Excluir agendamento ${s.title}`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
             ))}

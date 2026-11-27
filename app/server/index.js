@@ -5,19 +5,15 @@ const path = require("path");
 const fs = require("fs");
 const { v4: uuidv4 } = require("uuid");
 const { db, getSettings, saveSettings, listApiKeys } = require("./db");
-const { processProjectPipeline, renderClipJob } = require("./workerBridge");
-const { generateSocialCopy, projectChat } = require("./llm");
+const { processProjectPipeline, renderClipJob, enqueueJob } = require("./workerBridge");
+const { callLLM, parseJsonSafe, generateSocialCopy, projectChat } = require("./llm");
 const { registerOAuthRoutes, uploadToYouTubeShorts } = require("./oauth");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const STORAGE_UPLOADS = path.resolve(__dirname, "../storage/uploads");
-const STORAGE_BRANDKITS = path.resolve(__dirname, "../storage/brandkits");
+const { STORAGE_UPLOADS, STORAGE_BRANDKITS, STORAGE_PROJECTS, STORAGE_EXPORTS } = require("./paths");
 const WEB_DIST = path.resolve(__dirname, "../web/dist");
-
-fs.mkdirSync(STORAGE_UPLOADS, { recursive: true });
-fs.mkdirSync(STORAGE_BRANDKITS, { recursive: true });
 
 app.use(cors());
 app.use(express.json({ limit: "25mb" }));
@@ -44,6 +40,14 @@ const uploadLogo = multer({
   limits: { fileSize: 20 * 1024 * 1024 }
 });
 
+function getVideoContentType(filePath) {
+  const ext = path.extname(filePath || "").toLowerCase();
+  if (ext === ".webm") return "video/webm";
+  if (ext === ".mov") return "video/quicktime";
+  if (ext === ".mkv") return "video/x-matroska";
+  return "video/mp4";
+}
+
 // Helper: HTTP Range streaming for mobile Safari/Chrome video playback
 function streamVideoFile(req, res, filePath, downloadName = null) {
   if (!filePath || !fs.existsSync(filePath)) {
@@ -51,31 +55,67 @@ function streamVideoFile(req, res, filePath, downloadName = null) {
   }
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
+  const contentType = getVideoContentType(filePath);
   const range = req.headers.range;
 
   if (downloadName) {
     res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
   }
 
+  const pipeWithErrorHandling = (stream) => {
+    stream.on("error", err => {
+      console.error("[Video stream error]", err.message);
+      if (!res.headersSent) res.status(500).end();
+      else res.destroy(err);
+    });
+    res.on("close", () => stream.destroy());
+    stream.pipe(res);
+  };
+
   if (range) {
-    const parts = range.replace(/bytes=/, "").split("-");
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : Math.min(start + 2 * 1024 * 1024, fileSize - 1);
+    const match = /^bytes=(\d*)-(\d*)$/i.exec(String(range).trim());
+    if (!match || (match[1] === "" && match[2] === "") || fileSize === 0) {
+      res.setHeader("Content-Range", `bytes */${fileSize}`);
+      return res.status(416).end();
+    }
+
+    let start;
+    let end;
+    if (match[1] === "") {
+      // Suffix range: bytes=-N
+      const suffixLength = Number(match[2]);
+      if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+        res.setHeader("Content-Range", `bytes */${fileSize}`);
+        return res.status(416).end();
+      }
+      start = Math.max(0, fileSize - suffixLength);
+      end = fileSize - 1;
+    } else {
+      start = Number(match[1]);
+      end = match[2] !== "" ? Number(match[2]) : Math.min(start + 2 * 1024 * 1024, fileSize - 1);
+      end = Math.min(end, fileSize - 1);
+    }
+
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start >= fileSize || start > end) {
+      res.setHeader("Content-Range", `bytes */${fileSize}`);
+      return res.status(416).end();
+    }
+
     const chunksize = end - start + 1;
     res.writeHead(206, {
       "Content-Range": `bytes ${start}-${end}/${fileSize}`,
       "Accept-Ranges": "bytes",
       "Content-Length": chunksize,
-      "Content-Type": "video/mp4"
+      "Content-Type": contentType
     });
-    fs.createReadStream(filePath, { start, end }).pipe(res);
+    pipeWithErrorHandling(fs.createReadStream(filePath, { start, end }));
   } else {
     res.writeHead(200, {
       "Content-Length": fileSize,
       "Accept-Ranges": "bytes",
-      "Content-Type": "video/mp4"
+      "Content-Type": contentType
     });
-    fs.createReadStream(filePath).pipe(res);
+    pipeWithErrorHandling(fs.createReadStream(filePath));
   }
 }
 
@@ -240,8 +280,8 @@ app.post("/api/projects/youtube", (req, res) => {
     VALUES (?, ?, 'youtube', ?, ?, 'queued', 5, 'Iniciando download do YouTube...', ?)
   `).run(id, title || "Importando vídeo do YouTube...", url.trim(), workflowId, now);
 
-  // Fire background pipeline
-  setImmediate(() => processProjectPipeline(id));
+  // Enqueue bounded background pipeline
+  enqueueJob(() => processProjectPipeline(id)).catch(err => console.error("[Pipeline queue error]", err.message));
   res.status(201).json({ id, status: "queued" });
 });
 
@@ -259,7 +299,7 @@ app.post("/api/projects/upload", uploadVideo.single("video"), (req, res) => {
     VALUES (?, ?, 'upload', ?, ?, 'queued', 10, 'Vídeo recebido! Preparando extração...', ?)
   `).run(id, title, req.file.path, workflowId, now);
 
-  setImmediate(() => processProjectPipeline(id));
+  enqueueJob(() => processProjectPipeline(id)).catch(err => console.error("[Pipeline queue error]", err.message));
   res.status(201).json({ id, status: "queued" });
 });
 
@@ -281,22 +321,30 @@ app.get("/api/projects/:id", (req, res) => {
 app.delete("/api/projects/:id", (req, res) => {
   const projectId = req.params.id;
   const project = db.prepare("SELECT videoPath, audioPath, thumbPath FROM projects WHERE id = ?").get(projectId);
-  const clips = db.prepare("SELECT exportPath FROM clips WHERE projectId = ?").all(projectId);
+  const clips = db.prepare("SELECT exportPath, tracksJson FROM clips WHERE projectId = ?").all(projectId);
 
-  // 1. Delete rendered clip MP4s and .ass subtitle files from storage/exports (Drive)
+  // 1. Delete rendered clip MP4s, .ass subtitle files, and BGM tracks
   for (const c of clips) {
     if (c.exportPath) {
       try { if (fs.existsSync(c.exportPath)) fs.unlinkSync(c.exportPath); } catch {}
       const assPath = c.exportPath.replace(/\.mp4$/i, ".ass");
       try { if (fs.existsSync(assPath)) fs.unlinkSync(assPath); } catch {}
     }
+    try {
+      const tracks = JSON.parse(c.tracksJson || "[]");
+      for (const t of tracks) {
+        if (t.type === "bgm" && t.filePath) {
+          try { if (fs.existsSync(t.filePath)) fs.unlinkSync(t.filePath); } catch {}
+        }
+      }
+    } catch {}
   }
 
   // 2. Delete uploaded source video (if in storage/uploads) & entire storage/projects/<id> folder
   if (project?.videoPath) {
     try { if (fs.existsSync(project.videoPath)) fs.unlinkSync(project.videoPath); } catch {}
   }
-  const projectDir = path.resolve(__dirname, "../storage/projects", projectId);
+  const projectDir = path.join(STORAGE_PROJECTS, projectId);
   try {
     if (fs.existsSync(projectDir)) fs.rmSync(projectDir, { recursive: true, force: true });
   } catch {}
@@ -404,17 +452,44 @@ app.post("/api/clips/:id/ai-emojis", (req, res) => {
 
 app.post("/api/clips/:id/bgm", uploadVideo.single("audio"), (req, res) => {
   const clip = db.prepare("SELECT * FROM clips WHERE id = ?").get(req.params.id);
-  if (!clip) return res.status(404).json({ error: "Clipe não encontrado." });
+  if (!clip) {
+    if (req.file?.path) {
+      try { if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); } catch {}
+    }
+    return res.status(404).json({ error: "Clipe não encontrado." });
+  }
   if (!req.file) return res.status(400).json({ error: "Envie um arquivo de áudio (MP3, WAV ou M4A)." });
 
-  const tracks = JSON.parse(clip.tracksJson || "[]").filter(t => t.type !== "bgm");
+  const existingTracks = JSON.parse(clip.tracksJson || "[]");
+  for (const t of existingTracks) {
+    if (t.type === "bgm" && t.filePath && t.filePath !== req.file.path) {
+      try { if (fs.existsSync(t.filePath)) fs.unlinkSync(t.filePath); } catch {}
+    }
+  }
+
+  const tracks = existingTracks.filter(t => t.type !== "bgm");
   tracks.push({
     type: "bgm",
     name: req.file.originalname,
     filePath: req.file.path,
-    volume: Number(req.body.volume ?? 0.22),
-    ducking: req.body.ducking !== "false"
+    volume: Number(req.body?.volume ?? 0.22),
+    ducking: req.body?.ducking !== "false"
   });
+  db.prepare("UPDATE clips SET tracksJson = ? WHERE id = ?").run(JSON.stringify(tracks), clip.id);
+  res.json({ clip: formatClip(db.prepare("SELECT * FROM clips WHERE id = ?").get(clip.id)) });
+});
+
+app.delete("/api/clips/:id/bgm", (req, res) => {
+  const clip = db.prepare("SELECT * FROM clips WHERE id = ?").get(req.params.id);
+  if (!clip) return res.status(404).json({ error: "Clipe não encontrado." });
+
+  const existingTracks = JSON.parse(clip.tracksJson || "[]");
+  for (const t of existingTracks) {
+    if (t.type === "bgm" && t.filePath) {
+      try { if (fs.existsSync(t.filePath)) fs.unlinkSync(t.filePath); } catch {}
+    }
+  }
+  const tracks = existingTracks.filter(t => t.type !== "bgm");
   db.prepare("UPDATE clips SET tracksJson = ? WHERE id = ?").run(JSON.stringify(tracks), clip.id);
   res.json({ clip: formatClip(db.prepare("SELECT * FROM clips WHERE id = ?").get(clip.id)) });
 });
@@ -422,15 +497,14 @@ app.post("/api/clips/:id/bgm", uploadVideo.single("audio"), (req, res) => {
 app.post("/api/clips/:id/translate", async (req, res) => {
   const clip = db.prepare("SELECT * FROM clips WHERE id = ?").get(req.params.id);
   if (!clip) return res.status(404).json({ error: "Clipe não encontrado." });
-  const targetLang = req.body.targetLang || "English";
+  const targetLang = (req.body && req.body.targetLang) || "English";
   const words = JSON.parse(clip.wordsJson || "[]");
   if (words.length === 0) return res.json({ words });
 
   try {
-    const { callLLM } = require("./llm");
     const sys = `Translate the array of subtitle words into ${targetLang}. Keep the EXACT same array length (${words.length} items) so timestamps stay synced. Reply strictly as JSON: {"words": ["w1", "w2", ...]}`;
     const raw = await callLLM(getSettings(), sys, JSON.stringify(words.map(w => w.text)), true);
-    const parsed = raw ? JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || "{}") : null;
+    const parsed = parseJsonSafe(raw);
     if (parsed && Array.isArray(parsed.words) && parsed.words.length > 0) {
       const translated = words.map((w, i) => ({ ...w, text: String(parsed.words[i] || w.text) }));
       db.prepare("UPDATE clips SET wordsJson = ? WHERE id = ?").run(JSON.stringify(translated), clip.id);
@@ -442,14 +516,22 @@ app.post("/api/clips/:id/translate", async (req, res) => {
   }
 });
 
+const pendingRenderClips = new Set();
+
 app.post("/api/clips/:id/render", (req, res) => {
   const clip = db.prepare("SELECT * FROM clips WHERE id = ?").get(req.params.id);
   if (!clip) return res.status(404).json({ error: "Clipe não encontrado." });
+  if (pendingRenderClips.has(clip.id) || clip.exportStatus === "rendering") {
+    return res.status(409).json({ error: "Este clipe já está na fila ou em renderização.", status: "rendering", clipId: clip.id });
+  }
   const { resolution = "1080p", fps = 30 } = req.body || {};
 
-  setImmediate(() => {
-    renderClipJob(clip.id, { resolution, fps }).catch(err => console.error("[Render error]", err.message));
-  });
+  pendingRenderClips.add(clip.id);
+  db.prepare("UPDATE clips SET exportStatus = 'rendering', exportError = '' WHERE id = ?").run(clip.id);
+
+  enqueueJob(() => renderClipJob(clip.id, { resolution, fps }))
+    .catch(err => console.error("[Render error]", err.message))
+    .finally(() => pendingRenderClips.delete(clip.id));
   res.json({ status: "rendering", clipId: clip.id });
 });
 
@@ -503,14 +585,25 @@ app.get("/api/brand-kits", (_, res) => {
 
 app.post("/api/brand-kits", uploadLogo.single("logo"), (req, res) => {
   const id = `BK_${uuidv4().slice(0, 8)}`;
-  const { name = "Meu Brand Kit", primaryColor = "#0169EE", highlightColor = "#04F827", secondaryColor = "#FF37B9", fontFamily = "DejaVu Sans", defaultPreset = "karaoke" } = req.body || {};
+  const {
+    name = "Meu Brand Kit",
+    primaryColor = "#0169EE",
+    highlightColor = "#04F827",
+    secondaryColor = "#FF37B9",
+    fontFamily = "DejaVu Sans",
+    defaultPreset = "karaoke",
+    watermarkPosition = "top-right",
+    watermarkOpacity = 0.9
+  } = req.body || {};
   const logoPath = req.file ? req.file.path : "";
+  const parsedOpacity = Number(watermarkOpacity);
+  const safeOpacity = Number.isFinite(parsedOpacity) ? Math.max(0, Math.min(1, parsedOpacity)) : 0.9;
   const now = new Date().toISOString();
 
   db.prepare(`
-    INSERT INTO brand_kits (id, name, logoPath, primaryColor, highlightColor, secondaryColor, fontFamily, defaultPreset, createdAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, name, logoPath, primaryColor, highlightColor, secondaryColor, fontFamily, defaultPreset, now);
+    INSERT INTO brand_kits (id, name, logoPath, primaryColor, highlightColor, secondaryColor, fontFamily, defaultPreset, watermarkPosition, watermarkOpacity, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, name, logoPath, primaryColor, highlightColor, secondaryColor, fontFamily, defaultPreset, watermarkPosition, safeOpacity, now);
 
   res.status(201).json({ kit: db.prepare("SELECT * FROM brand_kits WHERE id = ?").get(id) });
 });
@@ -613,7 +706,12 @@ async function executePublishSchedule(scheduleId) {
   db.prepare("UPDATE publish_schedules SET status = 'UPLOADING', errorMsg = '' WHERE id = ?").run(item.id);
   try {
     if (acc.platform === "YOUTUBE") {
-      const publishedUrl = await uploadToYouTubeShorts(item, acc, clip?.exportPath);
+      if (!clip?.exportPath || !fs.existsSync(clip.exportPath)) {
+        const msg = "Renderize o clipe em MP4 no Editor antes de publicar no YouTube.";
+        db.prepare("UPDATE publish_schedules SET status = 'FAILED', errorMsg = ? WHERE id = ?").run(msg, item.id);
+        return { status: "FAILED", error: msg };
+      }
+      const publishedUrl = await uploadToYouTubeShorts(item, acc, clip.exportPath);
       db.prepare("UPDATE publish_schedules SET status = 'PUBLISHED', publishedUrl = ?, errorMsg = '' WHERE id = ?")
         .run(publishedUrl, item.id);
       return { status: "PUBLISHED", publishedUrl };
@@ -660,6 +758,32 @@ if (fs.existsSync(WEB_DIST)) {
     res.sendFile(path.join(WEB_DIST, "index.html"));
   });
 }
+
+function recoverStuckJobsOnStartup() {
+  db.prepare(`
+    UPDATE projects
+    SET status = 'error',
+        errorMsg = 'Processo interrompido por reinício do servidor. Reenvie ou tente novamente.',
+        progressMsg = 'Erro: processo interrompido por reinício do servidor.'
+    WHERE status IN ('queued', 'downloading', 'transcribing', 'tracking', 'curating')
+  `).run();
+
+  db.prepare(`
+    UPDATE clips
+    SET exportStatus = 'error',
+        exportError = 'Renderização interrompida por reinício do servidor.'
+    WHERE exportStatus = 'rendering'
+  `).run();
+
+  db.prepare(`
+    UPDATE publish_schedules
+    SET status = 'FAILED',
+        errorMsg = 'Upload interrompido por reinício do servidor.'
+    WHERE status = 'UPLOADING'
+  `).run();
+}
+
+recoverStuckJobsOnStartup();
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Opus2Short AI Studio Server listening on http://0.0.0.0:${PORT}`);

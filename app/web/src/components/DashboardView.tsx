@@ -13,21 +13,31 @@ export const DashboardView: React.FC<Props> = ({ workflows, onOpenProject }) => 
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const loadProjects = async () => {
     try {
       const r = await api.getProjects();
       setProjects(r.projects);
-    } catch (e: any) {
-      setErr(e.message);
+      setErr("");
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Erro ao carregar projetos.");
     }
   };
 
   useEffect(() => {
     loadProjects();
+  }, []);
+
+  useEffect(() => {
+    const hasActive = projects.some(p =>
+      ["queued", "downloading", "transcribing", "tracking", "curating"].includes(p.status)
+    );
+    if (!hasActive) return;
     const t = setInterval(loadProjects, 3000);
     return () => clearInterval(t);
-  }, []);
+  }, [projects]);
 
   const handleYoutube = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -63,9 +73,17 @@ export const DashboardView: React.FC<Props> = ({ workflows, onOpenProject }) => 
 
   const handleDelete = async (id: string, ev: React.MouseEvent) => {
     ev.stopPropagation();
-    if (!confirm("Excluir este projeto e todos os seus clipes?")) return;
-    await api.deleteProject(id);
-    await loadProjects();
+    setDeletingId(id);
+    setErr("");
+    try {
+      await api.deleteProject(id);
+      setConfirmDeleteId(null);
+      await loadProjects();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Erro ao excluir projeto.");
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   return (
@@ -215,13 +233,32 @@ export const DashboardView: React.FC<Props> = ({ workflows, onOpenProject }) => 
                 <div className="p-3.5 space-y-2">
                   <div className="flex items-start justify-between gap-2">
                     <h4 className="text-xs font-bold text-white line-clamp-2">{p.title}</h4>
-                    <button
-                      onClick={ev => handleDelete(p.id, ev)}
-                      className="text-slate-500 hover:text-red-400 p-1 rounded"
-                      title="Excluir"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                    {confirmDeleteId === p.id ? (
+                      <div className="flex items-center gap-1 shrink-0" onClick={ev => ev.stopPropagation()}>
+                        <button
+                          onClick={ev => handleDelete(p.id, ev)}
+                          disabled={deletingId === p.id}
+                          className="px-2 py-1 rounded bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold disabled:opacity-50"
+                        >
+                          {deletingId === p.id ? "..." : "Confirmar"}
+                        </button>
+                        <button
+                          onClick={ev => { ev.stopPropagation(); setConfirmDeleteId(null); }}
+                          className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold"
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={ev => { ev.stopPropagation(); setConfirmDeleteId(p.id); }}
+                        className="text-slate-500 hover:text-red-400 p-1 rounded shrink-0"
+                        title="Excluir projeto"
+                        aria-label={`Excluir projeto ${p.title}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
 
                   {p.status === "error" && (

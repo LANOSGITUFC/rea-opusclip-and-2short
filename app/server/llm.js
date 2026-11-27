@@ -3,16 +3,14 @@
  * + deterministic local fallback when no API key is configured yet.
  */
 
-async function callLLM(settings, systemPrompt, userPrompt, expectJson = false) {
-  const apiKey = (settings.llmApiKey || "").trim();
+const { getActiveKeysFor, recordKeySuccess, recordKeyError } = require("./db");
+
+async function callSingleProvider(provider, model, apiKey, systemPrompt, userPrompt, expectJson = false) {
   if (!apiKey) return null;
 
-  const provider = settings.llmProvider || "openai";
-  let model = (settings.llmModel || "").trim();
-
   if (provider === "gemini") {
-    model = model || "gemini-2.0-flash";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const gemModel = model || "gemini-2.0-flash";
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(gemModel)}:generateContent?key=${encodeURIComponent(apiKey)}`;
     const body = {
       contents: [{ role: "user", parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
       generationConfig: {
@@ -23,9 +21,14 @@ async function callLLM(settings, systemPrompt, userPrompt, expectJson = false) {
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(45000)
     });
-    if (!res.ok) throw new Error(`Gemini API error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) {
+      const err = new Error(`Gemini API error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+      err.statusCode = res.status;
+      throw err;
+    }
     const data = await res.json();
     return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
   }
@@ -61,7 +64,12 @@ async function callLLM(settings, systemPrompt, userPrompt, expectJson = false) {
     ...(expectJson ? { response_format: { type: "json_object" } } : {})
   };
 
-  const res = await fetch(baseUrl, { method: "POST", headers, body: JSON.stringify(body) });
+  const res = await fetch(baseUrl, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(45000)
+  });
   if (!res.ok) {
     const err = new Error(`${provider} API error (${res.status}): ${(await res.text()).slice(0, 180)}`);
     err.statusCode = res.status;
@@ -89,9 +97,11 @@ async function callLLM(settings, systemPrompt, userPrompt, expectJson = false) {
   let lastErr = null;
   for (const keyRow of candidates) {
     try {
+      const preferredProvider = settings.llmProvider || "groq";
+      const effectiveModel = keyRow.model || (keyRow.provider === preferredProvider ? settings.llmModel : undefined);
       const result = await callSingleProvider(
         keyRow.provider,
-        keyRow.model || settings.llmModel,
+        effectiveModel,
         keyRow.apiKey,
         systemPrompt,
         userPrompt,
@@ -198,14 +208,28 @@ function fallbackCurateClips(segments, duration, workflowId, projectTitle) {
   return clips.sort((a, b) => b.viralityScore - a.viralityScore);
 }
 
+function sampleTranscriptSegments(segments, maxCount = 200) {
+  if (!Array.isArray(segments) || segments.length <= maxCount) return segments || [];
+  const sampled = [];
+  const seen = new Set();
+  for (let i = 0; i < maxCount; i++) {
+    const idx = Math.round((i * (segments.length - 1)) / (maxCount - 1));
+    if (!seen.has(idx)) {
+      seen.add(idx);
+      sampled.push(segments[idx]);
+    }
+  }
+  return sampled;
+}
+
 async function curateViralClips({ segments, duration, workflowId, projectTitle, settings }) {
-  if (!settings.llmApiKey || !segments || segments.length === 0) {
+  if (!segments || segments.length === 0) {
     return fallbackCurateClips(segments, duration, workflowId, projectTitle);
   }
 
   try {
-    const compactTranscript = segments
-      .slice(0, 180)
+    const representativeSegments = sampleTranscriptSegments(segments, 200);
+    const compactTranscript = representativeSegments
       .map(s => `[${s.start.toFixed(1)}-${s.end.toFixed(1)}] ${s.text}`)
       .join("\n");
 
@@ -257,22 +281,20 @@ Responda ESTRITAMENTE em JSON válido no formato:
 
 async function generateSocialCopy({ clip, platform, customPrompt, settings }) {
   const promptText = customPrompt || settings.socialCopyPrompt || "";
-  if (settings.llmApiKey) {
-    try {
-      const sys = `Você gera copy social (PlanSocial) otimizada para a plataforma ${platform}. Responda em JSON: {"title":"...","description":"...","hashtags":"..."}`;
-      const usr = `Clipe: ${clip.title}\nDescrição atual: ${clip.description}\nInstrução do usuário: ${promptText}`;
-      const raw = await callLLM(settings, sys, usr, true);
-      const parsed = parseJsonSafe(raw);
-      if (parsed && parsed.title) {
-        return {
-          title: String(parsed.title),
-          description: String(parsed.description || clip.description),
-          hashtags: String(parsed.hashtags || clip.hashtags)
-        };
-      }
-    } catch (err) {
-      console.error("[LLM generateSocialCopy fallback]", err.message);
+  try {
+    const sys = `Você gera copy social (PlanSocial) otimizada para a plataforma ${platform}. Responda em JSON: {"title":"...","description":"...","hashtags":"..."}`;
+    const usr = `Clipe: ${clip.title}\nDescrição atual: ${clip.description}\nInstrução do usuário: ${promptText}`;
+    const raw = await callLLM(settings, sys, usr, true);
+    const parsed = parseJsonSafe(raw);
+    if (parsed && parsed.title) {
+      return {
+        title: String(parsed.title),
+        description: String(parsed.description || clip.description),
+        hashtags: String(parsed.hashtags || clip.hashtags)
+      };
     }
+  } catch (err) {
+    console.error("[LLM generateSocialCopy fallback]", err.message);
   }
 
   const suffix = platform === "YOUTUBE" ? " #shorts" : platform === "INSTAGRAM_BUSINESS" ? " #reels" : " #fyp";
@@ -284,19 +306,17 @@ async function generateSocialCopy({ clip, platform, customPrompt, settings }) {
 }
 
 async function projectChat({ project, clips, history, message, settings }) {
-  if (settings.llmApiKey) {
-    try {
-      const sys = `Você é o Project Chat (copiloto de vídeo do 2Short.ai / OpusClip).
+  try {
+    const sys = `Você é o Project Chat (copiloto de vídeo do 2Short.ai / OpusClip).
 Projeto: "${project.title}" (${Math.round(project.duration)}s).
 Clipes já detectados: ${clips.map(c => `"${c.title}" (${c.startSec}s-${c.endSec}s, score ${c.viralityScore})`).join("; ")}.
 Transcrição (trecho): ${(project.transcriptText || "").slice(0, 6000)}
 Responda em português de forma prática, direta e com timestamps [MM:SS] quando citar trechos do vídeo.`;
-      const convo = (history || []).slice(-6).map(m => `${m.role === "user" ? "Usuário" : "Assistente"}: ${m.content}`).join("\n");
-      const reply = await callLLM(settings, sys, `${convo}\nUsuário: ${message}`, false);
-      if (reply) return reply;
-    } catch (err) {
-      return `Erro ao chamar sua API de IA (${err.message}). Verifique a chave na aba **Configurações**.`;
-    }
+    const convo = (history || []).slice(-6).map(m => `${m.role === "user" ? "Usuário" : "Assistente"}: ${m.content}`).join("\n");
+    const reply = await callLLM(settings, sys, `${convo}\nUsuário: ${message}`, false);
+    if (reply) return reply;
+  } catch (err) {
+    return `Erro ao chamar sua API de IA (${err.message}). Verifique a chave na aba **Configurações**.`;
   }
 
   // Local smart fallback for quick actions
@@ -327,4 +347,4 @@ Responda em português de forma prática, direta e com timestamps [MM:SS] quando
   return `Analisei o projeto **${project.title}** (${clips.length} clipes prontos, ${segments.length} segmentos transcritos). Configure sua chave de IA (OpenAI, Gemini, Groq ou OpenRouter) na aba **Configurações** para liberar respostas completas com LLM!`;
 }
 
-module.exports = { callLLM, curateViralClips, generateSocialCopy, projectChat };
+module.exports = { callLLM, curateViralClips, generateSocialCopy, projectChat, parseJsonSafe };

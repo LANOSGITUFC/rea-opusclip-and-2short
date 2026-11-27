@@ -24,11 +24,11 @@ RUN npm --prefix ./app/server install --omit=dev --no-audit --no-fund
 COPY app/server ./app/server
 COPY app/worker ./app/worker
 
-# Runtime writable dirs (works on Hugging Face Spaces port 7860 & Oracle Cloud port 3000)
+# Runtime writable dirs (default port 3000; override PORT=7860 for Hugging Face Spaces)
 RUN mkdir -p /studio/app/data /studio/app/storage/uploads /studio/app/storage/projects /studio/app/storage/exports /studio/app/storage/brandkits \
     && chmod -R 777 /studio/app/data /studio/app/storage
 
-ENV PORT=7860
-EXPOSE 7860 3000
+ENV PORT=3000
+EXPOSE 3000 7860
 
 CMD ["node", "/studio/app/server/index.js"]

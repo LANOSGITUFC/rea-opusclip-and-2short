@@ -6,8 +6,7 @@ const { db, getSettings, getActiveKeysFor, recordKeySuccess, recordKeyError } = 
 const { curateViralClips } = require("./llm");
 
 const WORKER_SCRIPT = path.resolve(__dirname, "../worker/pipeline.py");
-const STORAGE_PROJECTS = path.resolve(__dirname, "../storage/projects");
-const STORAGE_EXPORTS = path.resolve(__dirname, "../storage/exports");
+const { STORAGE_PROJECTS, STORAGE_EXPORTS } = require("./paths");
 
 function runPythonWorker(command, payload) {
   return new Promise((resolve, reject) => {
@@ -53,64 +52,74 @@ async function transcribeViaCloudApi(audioPath, settings) {
   }
   if (candidates.length === 0) return null;
 
-  const mp3Path = audioPath.replace(/\.wav$/i, ".mp3");
-  execFileSync("ffmpeg", ["-y", "-i", audioPath, "-ac", "1", "-ar", "16000", "-b:a", "48k", mp3Path], { stdio: "ignore" });
-  const buf = fs.readFileSync(mp3Path);
+  const mp3Path = path.join(
+    path.dirname(audioPath),
+    `${path.basename(audioPath, path.extname(audioPath))}_${Date.now()}_${uuidv4().slice(0, 6)}.mp3`
+  );
+  try {
+    execFileSync("ffmpeg", ["-y", "-i", audioPath, "-ac", "1", "-ar", "16000", "-b:a", "48k", mp3Path], { stdio: "ignore" });
+    const buf = fs.readFileSync(mp3Path);
 
-  for (const keyRow of candidates) {
-    try {
-      const isGroq = keyRow.provider === "groq";
-      const endpoint = isGroq
-        ? "https://api.groq.com/openai/v1/audio/transcriptions"
-        : "https://api.openai.com/v1/audio/transcriptions";
-      const model = isGroq ? "whisper-large-v3-turbo" : "whisper-1";
+    for (const keyRow of candidates) {
+      try {
+        const isGroq = keyRow.provider === "groq";
+        const endpoint = isGroq
+          ? "https://api.groq.com/openai/v1/audio/transcriptions"
+          : "https://api.openai.com/v1/audio/transcriptions";
+        const model = isGroq ? "whisper-large-v3-turbo" : "whisper-1";
 
-      const fd = new FormData();
-      fd.append("file", new Blob([buf], { type: "audio/mpeg" }), "audio.mp3");
-      fd.append("model", model);
-      fd.append("response_format", "verbose_json");
-      fd.append("timestamp_granularities[]", "word");
-      fd.append("timestamp_granularities[]", "segment");
-      if (settings.defaultLanguage) fd.append("language", settings.defaultLanguage);
+        const fd = new FormData();
+        fd.append("file", new Blob([buf], { type: "audio/mpeg" }), "audio.mp3");
+        fd.append("model", model);
+        fd.append("response_format", "verbose_json");
+        fd.append("timestamp_granularities[]", "word");
+        fd.append("timestamp_granularities[]", "segment");
+        if (settings.defaultLanguage) fd.append("language", settings.defaultLanguage);
 
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${keyRow.apiKey}` },
-        body: fd
-      });
-      if (!res.ok) {
-        const err = new Error(`Cloud Whisper (${keyRow.provider}) ${res.status}: ${(await res.text()).slice(0, 180)}`);
-        err.statusCode = res.status;
-        throw err;
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${keyRow.apiKey}` },
+          body: fd,
+          signal: AbortSignal.timeout(60000)
+        });
+        if (!res.ok) {
+          const err = new Error(`Cloud Whisper (${keyRow.provider}) ${res.status}: ${(await res.text()).slice(0, 180)}`);
+          err.statusCode = res.status;
+          throw err;
+        }
+        const data = await res.json();
+        recordKeySuccess(keyRow.id);
+
+        const words = (data.words || []).map(w => ({
+          text: String(w.word || "").trim(),
+          start: Number(w.start || 0),
+          end: Number(w.end || 0)
+        })).filter(w => w.text);
+
+        const segments = (data.segments || []).map((s, idx) => ({
+          id: idx,
+          start: Number(s.start || 0),
+          end: Number(s.end || 0),
+          text: String(s.text || "").trim()
+        })).filter(s => s.text);
+
+        return {
+          language: data.language || settings.defaultLanguage || "pt",
+          text: data.text || segments.map(s => s.text).join(" "),
+          segments,
+          words
+        };
+      } catch (err) {
+        console.warn(`[Whisper Pool Failover] Key ${keyRow.id || "legacy"} (${keyRow.provider}) failed:`, err.message);
+        recordKeyError(keyRow.id, err.statusCode || 500, err.message);
       }
-      const data = await res.json();
-      recordKeySuccess(keyRow.id);
-
-      const words = (data.words || []).map(w => ({
-        text: String(w.word || "").trim(),
-        start: Number(w.start || 0),
-        end: Number(w.end || 0)
-      })).filter(w => w.text);
-
-      const segments = (data.segments || []).map((s, idx) => ({
-        id: idx,
-        start: Number(s.start || 0),
-        end: Number(s.end || 0),
-        text: String(s.text || "").trim()
-      })).filter(s => s.text);
-
-      return {
-        language: data.language || settings.defaultLanguage || "pt",
-        text: data.text || segments.map(s => s.text).join(" "),
-        segments,
-        words
-      };
-    } catch (err) {
-      console.warn(`[Whisper Pool Failover] Key ${keyRow.id || "legacy"} (${keyRow.provider}) failed:`, err.message);
-      recordKeyError(keyRow.id, err.statusCode || 500, err.message);
     }
+    return null;
+  } finally {
+    try {
+      if (fs.existsSync(mp3Path)) fs.unlinkSync(mp3Path);
+    } catch {}
   }
-  return null;
 }
 
 async function processProjectPipeline(projectId) {
@@ -287,12 +296,14 @@ async function renderClipJob(clipId, opts = {}) {
   db.prepare("UPDATE clips SET exportStatus = 'rendering', exportError = '' WHERE id = ?").run(clipId);
 
   try {
-    let watermarkPath = null;
+    const settings = getSettings();
+    let bk = null;
     if (clip.brandKitId) {
-      const bk = db.prepare("SELECT * FROM brand_kits WHERE id = ?").get(clip.brandKitId);
-      if (bk && bk.logoPath) watermarkPath = bk.logoPath;
+      bk = db.prepare("SELECT * FROM brand_kits WHERE id = ?").get(clip.brandKitId);
     }
+    const watermarkPath = bk?.logoPath || null;
 
+    fs.mkdirSync(STORAGE_EXPORTS, { recursive: true });
     const outPath = path.join(STORAGE_EXPORTS, `${clipId}_${Date.now()}.mp4`);
     const tracks = JSON.parse(clip.tracksJson || "[]");
     const bgmTrack = tracks.find(t => t.type === "bgm") || {};
@@ -313,6 +324,14 @@ async function renderClipJob(clipId, opts = {}) {
       caption_config: JSON.parse(clip.captionConfigJson || "{}"),
       words: JSON.parse(clip.wordsJson || "[]"),
       watermark_path: watermarkPath,
+      watermark_position: bk?.watermarkPosition || "top-right",
+      watermark_opacity: bk?.watermarkOpacity ?? 0.9,
+      brand_kit: bk ? {
+        primaryColor: bk.primaryColor,
+        highlightColor: bk.highlightColor,
+        secondaryColor: bk.secondaryColor,
+        fontFamily: bk.fontFamily
+      } : null,
       headline_text: clip.headlineText || "",
       progress_bar: Boolean(clip.progressBar),
       transition_type: clip.transitionType || "hard-cut",
@@ -321,8 +340,18 @@ async function renderClipJob(clipId, opts = {}) {
       bgm_path: bgmTrack.filePath || null,
       bgm_volume: bgmTrack.volume ?? 0.22,
       bgm_ducking: bgmTrack.ducking !== false,
-      remove_silences: project.workflowId === "builtin:auto-edits" || Boolean(opts.removeSilences)
+      remove_silences: project.workflowId === "builtin:auto-edits" || Boolean(opts.removeSilences),
+      workflow_id: project.workflowId || "builtin:long-to-shorts",
+      broll_enabled: project.workflowId === "builtin:ai-broll" || Boolean(opts.brollEnabled),
+      giphy_api_key: settings.giphyApiKey || "",
+      translate_dubbing: project.workflowId === "builtin:translate-dubbing" || Boolean(opts.translateDubbing)
     });
+
+    if (clip.exportPath && clip.exportPath !== res.exportPath) {
+      try { if (fs.existsSync(clip.exportPath)) fs.unlinkSync(clip.exportPath); } catch {}
+      const oldAss = clip.exportPath.replace(/\.mp4$/i, ".ass");
+      try { if (fs.existsSync(oldAss)) fs.unlinkSync(oldAss); } catch {}
+    }
 
     db.prepare("UPDATE clips SET exportStatus = 'done', exportPath = ? WHERE id = ?").run(res.exportPath, clipId);
     return res;
@@ -332,4 +361,29 @@ async function renderClipJob(clipId, opts = {}) {
   }
 }
 
-module.exports = { runPythonWorker, processProjectPipeline, renderClipJob };
+const JOB_CONCURRENCY = Math.max(1, parseInt(process.env.JOB_CONCURRENCY || "2", 10) || 2);
+const jobQueue = [];
+let activeJobs = 0;
+
+function pumpJobQueue() {
+  while (activeJobs < JOB_CONCURRENCY && jobQueue.length > 0) {
+    const task = jobQueue.shift();
+    activeJobs++;
+    Promise.resolve()
+      .then(() => task.fn())
+      .then(task.resolve, task.reject)
+      .finally(() => {
+        activeJobs--;
+        pumpJobQueue();
+      });
+  }
+}
+
+function enqueueJob(fn) {
+  return new Promise((resolve, reject) => {
+    jobQueue.push({ fn, resolve, reject });
+    pumpJobQueue();
+  });
+}
+
+module.exports = { runPythonWorker, processProjectPipeline, renderClipJob, enqueueJob };

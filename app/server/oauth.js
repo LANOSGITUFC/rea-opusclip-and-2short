@@ -1,9 +1,36 @@
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
+const { Readable } = require("stream");
 const { v4: uuidv4 } = require("uuid");
-const { db, getSettings, saveSettings } = require("./db");
+const { db, getSettings, saveSettings, upsertSocialAccount } = require("./db");
 
-const DATA_DIR = path.resolve(__dirname, "../data");
+const { DATA_DIR } = require("./paths");
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const oauthStates = new Map();
+
+function pruneOAuthStates() {
+  const now = Date.now();
+  for (const [k, v] of oauthStates.entries()) {
+    if (v.expiresAt <= now) oauthStates.delete(k);
+  }
+}
+
+function createOAuthState(platform) {
+  pruneOAuthStates();
+  const state = crypto.randomBytes(24).toString("hex");
+  oauthStates.set(state, { platform, expiresAt: Date.now() + OAUTH_STATE_TTL_MS });
+  return state;
+}
+
+function verifyOAuthState(state, expectedPlatform) {
+  pruneOAuthStates();
+  if (!state || typeof state !== "string") return false;
+  const entry = oauthStates.get(state);
+  if (!entry) return false;
+  oauthStates.delete(state);
+  return entry.platform === expectedPlatform && entry.expiresAt > Date.now();
+}
 
 function getOAuthConfig() {
   const rows = db.prepare("SELECT key, value FROM settings WHERE key LIKE 'oauth_%'").all();
@@ -58,7 +85,8 @@ async function refreshGoogleAccessToken(account) {
       client_secret: cfg.googleClientSecret,
       refresh_token: account.refreshToken,
       grant_type: "refresh_token"
-    })
+    }),
+    signal: AbortSignal.timeout(15000)
   });
   if (!res.ok) return account.accessToken;
   const data = await res.json();
@@ -92,14 +120,25 @@ async function uploadToYouTubeShorts(schedule, account, videoFilePath) {
   };
 
   const boundary = "opus2short_yt_boundary_" + Date.now();
-  const videoBuffer = fs.readFileSync(videoFilePath);
+  const fileSize = fs.statSync(videoFilePath).size;
 
   const part1 = Buffer.from(
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
     `--${boundary}\r\nContent-Type: video/mp4\r\n\r\n`
   );
   const part2 = Buffer.from(`\r\n--${boundary}--\r\n`);
-  const body = Buffer.concat([part1, videoBuffer, part2]);
+  const contentLength = part1.length + fileSize + part2.length;
+
+  async function* multipartStream() {
+    yield part1;
+    const fileStream = fs.createReadStream(videoFilePath);
+    for await (const chunk of fileStream) {
+      yield chunk;
+    }
+    yield part2;
+  }
+
+  const bodyStream = Readable.toWeb(Readable.from(multipartStream()));
 
   const res = await fetch(
     "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=multipart&part=snippet,status",
@@ -108,9 +147,11 @@ async function uploadToYouTubeShorts(schedule, account, videoFilePath) {
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": `multipart/related; boundary=${boundary}`,
-        "Content-Length": String(body.length)
+        "Content-Length": String(contentLength)
       },
-      body
+      body: bodyStream,
+      duplex: "half",
+      signal: AbortSignal.timeout(180000)
     }
   );
 
@@ -188,6 +229,7 @@ function registerOAuthRoutes(app, uploadJsonMiddleware) {
       response_type: "code",
       access_type: "offline",
       prompt: "consent",
+      state: createOAuthState("YOUTUBE"),
       scope: [
         "https://www.googleapis.com/auth/youtube.upload",
         "https://www.googleapis.com/auth/youtube.readonly"
@@ -198,8 +240,11 @@ function registerOAuthRoutes(app, uploadJsonMiddleware) {
 
   app.get("/api/oauth/youtube/callback", async (req, res) => {
     try {
+      if (!verifyOAuthState(req.query.state, "YOUTUBE")) {
+        return res.redirect("/?oauth=error&platform=YOUTUBE&msg=invalid_or_expired_state");
+      }
       const code = req.query.code;
-      if (!code) return res.redirect("/?oauth=error&msg=missing_code");
+      if (!code) return res.redirect("/?oauth=error&platform=YOUTUBE&msg=missing_code");
       const cfg = getOAuthConfig();
       const redirectUri = `${getBaseUrl(req)}/api/oauth/youtube/callback`;
 
@@ -212,16 +257,18 @@ function registerOAuthRoutes(app, uploadJsonMiddleware) {
           client_secret: cfg.googleClientSecret,
           redirect_uri: redirectUri,
           grant_type: "authorization_code"
-        })
+        }),
+        signal: AbortSignal.timeout(15000)
       });
       const tokenData = await tokenRes.json();
       if (!tokenRes.ok || !tokenData.access_token) {
-        return res.redirect(`/?oauth=error&msg=${encodeURIComponent(tokenData.error_description || "token_exchange_failed")}`);
+        return res.redirect(`/?oauth=error&platform=YOUTUBE&msg=${encodeURIComponent(tokenData.error_description || "token_exchange_failed")}`);
       }
 
       // Fetch YouTube channel name
       const chRes = await fetch("https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true", {
-        headers: { Authorization: `Bearer ${tokenData.access_token}` }
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+        signal: AbortSignal.timeout(15000)
       });
       const chData = await chRes.json().catch(() => ({}));
       const ch = chData.items?.[0];
@@ -229,23 +276,20 @@ function registerOAuthRoutes(app, uploadJsonMiddleware) {
       const handle = ch?.snippet?.customUrl || "";
       const profileUrl = ch?.id ? `https://www.youtube.com/channel/${ch.id}` : "";
 
-      db.prepare(`
-        INSERT INTO social_accounts (id, platform, accountName, handle, profileUrl, scopesJson, accessToken, refreshToken, createdAt)
-        VALUES (?, 'YOUTUBE', ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        `SA_${uuidv4().slice(0, 8)}`,
-        name,
+      upsertSocialAccount({
+        id: `SA_${uuidv4().slice(0, 8)}`,
+        platform: "YOUTUBE",
+        accountName: name,
         handle,
         profileUrl,
-        JSON.stringify(["youtube.upload", "youtube.readonly"]),
-        tokenData.access_token,
-        tokenData.refresh_token || "",
-        new Date().toISOString()
-      );
+        scopesJson: JSON.stringify(["youtube.upload", "youtube.readonly"]),
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token || ""
+      });
 
       res.redirect("/?oauth=success&platform=YOUTUBE");
     } catch (err) {
-      res.redirect(`/?oauth=error&msg=${encodeURIComponent(err.message)}`);
+      res.redirect(`/?oauth=error&platform=YOUTUBE&msg=${encodeURIComponent(err.message)}`);
     }
   });
 
@@ -261,15 +305,18 @@ function registerOAuthRoutes(app, uploadJsonMiddleware) {
       scope: "user.info.basic,video.upload,video.publish",
       response_type: "code",
       redirect_uri: redirectUri,
-      state: uuidv4().slice(0, 12)
+      state: createOAuthState("TIKTOK_BUSINESS")
     });
     res.redirect(`https://www.tiktok.com/v2/auth/authorize/?${params.toString()}`);
   });
 
   app.get("/api/oauth/tiktok/callback", async (req, res) => {
     try {
+      if (!verifyOAuthState(req.query.state, "TIKTOK_BUSINESS")) {
+        return res.redirect("/?oauth=error&platform=TIKTOK_BUSINESS&msg=invalid_or_expired_state");
+      }
       const code = req.query.code;
-      if (!code) return res.redirect("/?oauth=error&msg=missing_code");
+      if (!code) return res.redirect("/?oauth=error&platform=TIKTOK_BUSINESS&msg=missing_code");
       const cfg = getOAuthConfig();
       const redirectUri = `${getBaseUrl(req)}/api/oauth/tiktok/callback`;
 
@@ -282,27 +329,25 @@ function registerOAuthRoutes(app, uploadJsonMiddleware) {
           code: String(code),
           grant_type: "authorization_code",
           redirect_uri: redirectUri
-        })
+        }),
+        signal: AbortSignal.timeout(15000)
       });
       const data = await tokenRes.json();
       if (!data.access_token) {
-        return res.redirect(`/?oauth=error&msg=${encodeURIComponent(data.error_description || "tiktok_token_failed")}`);
+        return res.redirect(`/?oauth=error&platform=TIKTOK_BUSINESS&msg=${encodeURIComponent(data.error_description || "tiktok_token_failed")}`);
       }
-      db.prepare(`
-        INSERT INTO social_accounts (id, platform, accountName, handle, scopesJson, accessToken, refreshToken, createdAt)
-        VALUES (?, 'TIKTOK_BUSINESS', ?, ?, ?, ?, ?, ?)
-      `).run(
-        `SA_${uuidv4().slice(0, 8)}`,
-        `TikTok (${data.open_id?.slice(0, 8) || "Conta"})`,
-        "",
-        JSON.stringify(["user.info.basic", "video.upload", "video.publish"]),
-        data.access_token,
-        data.refresh_token || "",
-        new Date().toISOString()
-      );
+      upsertSocialAccount({
+        id: `SA_${uuidv4().slice(0, 8)}`,
+        platform: "TIKTOK_BUSINESS",
+        accountName: `TikTok (${data.open_id?.slice(0, 8) || "Conta"})`,
+        handle: data.open_id || "",
+        scopesJson: JSON.stringify(["user.info.basic", "video.upload", "video.publish"]),
+        accessToken: data.access_token,
+        refreshToken: data.refresh_token || ""
+      });
       res.redirect("/?oauth=success&platform=TIKTOK_BUSINESS");
     } catch (err) {
-      res.redirect(`/?oauth=error&msg=${encodeURIComponent(err.message)}`);
+      res.redirect(`/?oauth=error&platform=TIKTOK_BUSINESS&msg=${encodeURIComponent(err.message)}`);
     }
   });
 
@@ -317,37 +362,42 @@ function registerOAuthRoutes(app, uploadJsonMiddleware) {
       client_id: cfg.metaAppId,
       redirect_uri: redirectUri,
       scope: "instagram_basic,instagram_content_publish,pages_show_list",
-      response_type: "code"
+      response_type: "code",
+      state: createOAuthState("INSTAGRAM_BUSINESS")
     });
     res.redirect(`https://www.facebook.com/v21.0/dialog/oauth?${params.toString()}`);
   });
 
   app.get("/api/oauth/instagram/callback", async (req, res) => {
     try {
+      if (!verifyOAuthState(req.query.state, "INSTAGRAM_BUSINESS")) {
+        return res.redirect("/?oauth=error&platform=INSTAGRAM_BUSINESS&msg=invalid_or_expired_state");
+      }
       const code = req.query.code;
-      if (!code) return res.redirect("/?oauth=error&msg=missing_code");
+      if (!code) return res.redirect("/?oauth=error&platform=INSTAGRAM_BUSINESS&msg=missing_code");
       const cfg = getOAuthConfig();
       const redirectUri = `${getBaseUrl(req)}/api/oauth/instagram/callback`;
 
       const tokenRes = await fetch(
-        `https://graph.facebook.com/v21.0/oauth/access_token?client_id=${encodeURIComponent(cfg.metaAppId)}&redirect_uri=${encodeURIComponent(redirectUri)}&client_secret=${encodeURIComponent(cfg.metaAppSecret)}&code=${encodeURIComponent(String(code))}`
+        `https://graph.facebook.com/v21.0/oauth/access_token?client_id=${encodeURIComponent(cfg.metaAppId)}&redirect_uri=${encodeURIComponent(redirectUri)}&client_secret=${encodeURIComponent(cfg.metaAppSecret)}&code=${encodeURIComponent(String(code))}`,
+        { signal: AbortSignal.timeout(15000) }
       );
       const data = await tokenRes.json();
       if (!data.access_token) {
-        return res.redirect(`/?oauth=error&msg=${encodeURIComponent(data.error?.message || "meta_token_failed")}`);
+        return res.redirect(`/?oauth=error&platform=INSTAGRAM_BUSINESS&msg=${encodeURIComponent(data.error?.message || "meta_token_failed")}`);
       }
-      db.prepare(`
-        INSERT INTO social_accounts (id, platform, accountName, handle, scopesJson, accessToken, refreshToken, createdAt)
-        VALUES (?, 'INSTAGRAM_BUSINESS', 'Instagram Business', '', ?, ?, '', ?)
-      `).run(
-        `SA_${uuidv4().slice(0, 8)}`,
-        JSON.stringify(["instagram_basic", "instagram_content_publish"]),
-        data.access_token,
-        new Date().toISOString()
-      );
+      upsertSocialAccount({
+        id: `SA_${uuidv4().slice(0, 8)}`,
+        platform: "INSTAGRAM_BUSINESS",
+        accountName: "Instagram Business",
+        handle: "",
+        scopesJson: JSON.stringify(["instagram_basic", "instagram_content_publish"]),
+        accessToken: data.access_token,
+        refreshToken: ""
+      });
       res.redirect("/?oauth=success&platform=INSTAGRAM_BUSINESS");
     } catch (err) {
-      res.redirect(`/?oauth=error&msg=${encodeURIComponent(err.message)}`);
+      res.redirect(`/?oauth=error&platform=INSTAGRAM_BUSINESS&msg=${encodeURIComponent(err.message)}`);
     }
   });
 }

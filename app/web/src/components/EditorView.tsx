@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { api, BrandKit, CaptionPreset, Clip, fmtTime, ProjectSummary, WordTiming } from "../api";
 import {
   ArrowLeft, Play, Pause, Volume2, VolumeX, Download, Sparkles, Save,
-  Sliders, Type, Layout, Wand2, Palette, Loader2, CheckCircle2, AlertCircle
+  Sliders, Type, Layout, Wand2, Palette, Loader2, CheckCircle2, AlertCircle, RefreshCw, Trash2, Music
 } from "lucide-react";
 
 interface Props {
@@ -36,25 +36,71 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
   const [exportRes, setExportRes] = useState("1080p");
   const [exportFps, setExportFps] = useState(30);
 
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [videoErr, setVideoErr] = useState(false);
+  const [aiEmojisBusy, setAiEmojisBusy] = useState(false);
+  const [translatingLang, setTranslatingLang] = useState<string | null>(null);
+  const [bgmBusy, setBgmBusy] = useState(false);
+  const [renderBusy, setRenderBusy] = useState(false);
+  const [editingWord, setEditingWord] = useState<{ idx: number; text: string } | null>(null);
+
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const facecamVideoRef = useRef<HTMLVideoElement | null>(null);
+  const bgmInputRef = useRef<HTMLInputElement | null>(null);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingPatchRef = useRef<Partial<Clip>>({});
+  const saveSeqRef = useRef(0);
+  const activeClipIdRef = useRef(clipId);
+  activeClipIdRef.current = clipId;
 
   const loadClip = async () => {
-    const r = await api.getClip(clipId);
-    setClip(r.clip);
-    setProject(r.project);
-    setCurTime(r.clip.startSec);
+    const requestedId = clipId;
+    setLoading(true);
+    setErr(null);
+    setVideoErr(false);
+    try {
+      const r = await api.getClip(requestedId);
+      if (activeClipIdRef.current !== requestedId) return;
+      setClip(r.clip);
+      setProject(r.project);
+      setCurTime(r.clip.startSec);
+    } catch (e: unknown) {
+      if (activeClipIdRef.current !== requestedId) return;
+      setErr(e instanceof Error ? e.message : "Erro ao carregar clipe.");
+    } finally {
+      if (activeClipIdRef.current === requestedId) {
+        setLoading(false);
+      }
+    }
   };
 
   useEffect(() => {
+    activeClipIdRef.current = clipId;
     loadClip();
+    return () => {
+      saveSeqRef.current += 1;
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+      pendingPatchRef.current = {};
+      setSaving(false);
+    };
   }, [clipId]);
 
   // Poll render status while rendering
   useEffect(() => {
     if (clip?.exportStatus !== "rendering") return;
     const t = setInterval(async () => {
-      const r = await api.getClip(clipId);
-      setClip(r.clip);
+      try {
+        const r = await api.getClip(clipId);
+        setClip(r.clip);
+      } catch (e: unknown) {
+        setActionErr(e instanceof Error ? e.message : "Erro ao verificar status da renderização.");
+      }
     }, 2500);
     return () => clearInterval(t);
   }, [clip?.exportStatus, clipId]);
@@ -67,7 +113,66 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
     }
   }, [clip?.id]);
 
-  if (!clip || !project) {
+  // Sync split-screen / multi-panel videos with main video via media event listeners
+  const auxVideoRefs = useRef<Array<HTMLVideoElement | null>>([]);
+  useEffect(() => {
+    const main = videoRef.current;
+    if (!main) return;
+    const isMulti = clip?.layoutMode === "split" || clip?.layoutMode === "three" || clip?.layoutMode === "four";
+    if (!isMulti) return;
+
+    const getSecondaries = (): HTMLVideoElement[] => {
+      const list: HTMLVideoElement[] = [];
+      if (clip?.layoutMode === "split" && facecamVideoRef.current) {
+        list.push(facecamVideoRef.current);
+      }
+      if (clip?.layoutMode === "three" || clip?.layoutMode === "four") {
+        for (const el of auxVideoRefs.current) {
+          if (el) list.push(el);
+        }
+      }
+      return list;
+    };
+
+    const syncAll = () => {
+      for (const sec of getSecondaries()) {
+        sec.currentTime = main.currentTime;
+        if (!main.paused && sec.paused) sec.play().catch(() => {});
+        else if (main.paused && !sec.paused) sec.pause();
+      }
+    };
+    syncAll();
+
+    const onPlay = () => {
+      for (const sec of getSecondaries()) sec.play().catch(() => {});
+    };
+    const onPause = () => {
+      for (const sec of getSecondaries()) sec.pause();
+    };
+    const onSeeked = () => {
+      for (const sec of getSecondaries()) sec.currentTime = main.currentTime;
+    };
+    const onTimeUpdate = () => {
+      for (const sec of getSecondaries()) {
+        if (Math.abs(sec.currentTime - main.currentTime) > 0.25) {
+          sec.currentTime = main.currentTime;
+        }
+      }
+    };
+
+    main.addEventListener("play", onPlay);
+    main.addEventListener("pause", onPause);
+    main.addEventListener("seeked", onSeeked);
+    main.addEventListener("timeupdate", onTimeUpdate);
+    return () => {
+      main.removeEventListener("play", onPlay);
+      main.removeEventListener("pause", onPause);
+      main.removeEventListener("seeked", onSeeked);
+      main.removeEventListener("timeupdate", onTimeUpdate);
+    };
+  }, [clip?.layoutMode, clip?.id]);
+
+  if (loading && !clip) {
     return (
       <div className="py-16 flex justify-center">
         <Loader2 className="w-6 h-6 text-purple-400 animate-spin" />
@@ -75,23 +180,94 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
     );
   }
 
+  if (err && (!clip || !project)) {
+    return (
+      <div className="max-w-md mx-auto my-12 bg-[#111827] border border-red-500/30 rounded-2xl p-6 text-center space-y-4">
+        <AlertCircle className="w-8 h-8 text-red-400 mx-auto" />
+        <div className="space-y-1">
+          <h3 className="text-sm font-bold text-white">Não foi possível carregar o editor</h3>
+          <p className="text-xs text-red-300">{err}</p>
+        </div>
+        <div className="flex items-center justify-center gap-2">
+          <button
+            onClick={onBack}
+            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold flex items-center gap-1.5"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" /> Voltar
+          </button>
+          <button
+            onClick={loadClip}
+            className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-1.5"
+          >
+            <RefreshCw className="w-3.5 h-3.5" /> Tentar novamente
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!clip || !project) return null;
+
   const activePreset = presets.find(p => p.id === clip.captionPreset) || presets[0] || {
     id: "karaoke", name: "Karaokê", primary: "#FFFFFF", highlight: "#04F827", uppercase: true, wordsPerLine: 3
   };
   const highlightColor = clip.captionConfig?.highlightColor || activePreset.highlight;
   const primaryColor = clip.captionConfig?.primaryColor || activePreset.primary;
+  const fontSize = clip.captionConfig?.fontSize ?? 22;
   const uppercase = clip.captionConfig?.uppercase ?? activePreset.uppercase;
   const posY = clip.captionConfig?.positionY ?? 0.72;
+  const bgmTrack = clip.tracks?.find(t => t.type === "bgm");
 
   const saveChanges = async (patch: Partial<Clip>) => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    const mergedPatch = { ...pendingPatchRef.current, ...patch };
+    pendingPatchRef.current = {};
+    const seq = ++saveSeqRef.current;
+
     setClip(prev => (prev ? { ...prev, ...patch } : prev));
     setSaving(true);
+    setActionErr(null);
     try {
-      const r = await api.updateClip(clip.id, patch);
-      setClip(r.clip);
+      const r = await api.updateClip(clip.id, mergedPatch);
+      if (seq === saveSeqRef.current) {
+        setClip(r.clip);
+      }
+    } catch (e: unknown) {
+      setActionErr(e instanceof Error ? e.message : "Erro ao salvar alterações.");
     } finally {
-      setSaving(false);
+      if (seq === saveSeqRef.current) {
+        setSaving(false);
+      }
     }
+  };
+
+  const debouncedSaveChanges = (patch: Partial<Clip>) => {
+    setClip(prev => (prev ? { ...prev, ...patch } : prev));
+    pendingPatchRef.current = { ...pendingPatchRef.current, ...patch };
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    const seq = ++saveSeqRef.current;
+    debounceTimerRef.current = setTimeout(async () => {
+      const toSend = pendingPatchRef.current;
+      pendingPatchRef.current = {};
+      debounceTimerRef.current = null;
+      setSaving(true);
+      setActionErr(null);
+      try {
+        const r = await api.updateClip(clip.id, toSend);
+        if (seq === saveSeqRef.current) {
+          setClip(r.clip);
+        }
+      } catch (e: unknown) {
+        setActionErr(e instanceof Error ? e.message : "Erro ao salvar alterações.");
+      } finally {
+        if (seq === saveSeqRef.current) {
+          setSaving(false);
+        }
+      }
+    }, 250);
   };
 
   const togglePlay = () => {
@@ -101,7 +277,7 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
       if (v.currentTime < clip.startSec || v.currentTime >= clip.endSec) {
         v.currentTime = clip.startSec;
       }
-      v.play();
+      v.play().catch(() => {});
       setPlaying(true);
     } else {
       v.pause();
@@ -128,25 +304,49 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
 
   const handleEditWord = (idx: number) => {
     const w = clip.words[idx];
-    const next = prompt("Editar palavra (ou deixe vazio para remover):", w.text);
-    if (next === null) return;
+    if (!w) return;
+    setEditingWord({ idx, text: w.text });
+  };
+
+  const commitEditWord = async (remove = false) => {
+    if (!editingWord) return;
     const updated = [...clip.words];
-    if (!next.trim()) {
-      updated.splice(idx, 1);
+    const trimmed = editingWord.text.trim();
+    if (remove || !trimmed) {
+      updated.splice(editingWord.idx, 1);
     } else {
-      updated[idx] = { ...w, text: next.trim() };
+      updated[editingWord.idx] = { ...updated[editingWord.idx], text: trimmed };
     }
-    saveChanges({ words: updated });
+    setEditingWord(null);
+    await saveChanges({ words: updated });
   };
 
   const handleAiEmojis = async () => {
-    const r = await api.generateAiEmojis(clip.id);
-    setClip(prev => (prev ? { ...prev, words: r.words } : prev));
+    setAiEmojisBusy(true);
+    setActionErr(null);
+    setActionMsg(null);
+    try {
+      const r = await api.generateAiEmojis(clip.id);
+      setClip(prev => (prev ? { ...prev, words: r.words } : prev));
+      setActionMsg("Emojis gerados com IA!");
+    } catch (e: unknown) {
+      setActionErr(e instanceof Error ? e.message : "Erro ao gerar AI Emojis.");
+    } finally {
+      setAiEmojisBusy(false);
+    }
   };
 
   const triggerRender = async () => {
-    await api.renderClip(clip.id, exportRes, exportFps);
-    setClip(prev => (prev ? { ...prev, exportStatus: "rendering", exportError: "" } : prev));
+    setRenderBusy(true);
+    setActionErr(null);
+    try {
+      await api.renderClip(clip.id, exportRes, exportFps);
+      setClip(prev => (prev ? { ...prev, exportStatus: "rendering", exportError: "" } : prev));
+    } catch (e: unknown) {
+      setActionErr(e instanceof Error ? e.message : "Erro ao iniciar renderização.");
+    } finally {
+      setRenderBusy(false);
+    }
   };
 
   // Determine current visible subtitle chunk
@@ -202,6 +402,20 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
         </div>
       </div>
 
+      {/* Action Feedback Banners */}
+      {actionErr && (
+        <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2"><AlertCircle className="w-4 h-4 shrink-0" /> {actionErr}</span>
+          <button onClick={() => setActionErr(null)} className="text-slate-400 hover:text-white text-xs">✕</button>
+        </div>
+      )}
+      {actionMsg && (
+        <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 shrink-0" /> {actionMsg}</span>
+          <button onClick={() => setActionMsg(null)} className="text-slate-400 hover:text-white text-xs">✕</button>
+        </div>
+      )}
+
       {/* Main 3-column / responsive editor workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         {/* LEFT: Word-by-word Transcript */}
@@ -210,14 +424,56 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
             <h3 className="text-xs font-bold text-white">Transcrição Palavra por Palavra</h3>
             <button
               onClick={handleAiEmojis}
-              className="px-2.5 py-1 rounded-lg bg-purple-600/20 border border-purple-500/40 text-purple-300 text-[11px] font-bold flex items-center gap-1 hover:bg-purple-600/30"
+              disabled={aiEmojisBusy}
+              className="px-2.5 py-1 rounded-lg bg-purple-600/20 border border-purple-500/40 text-purple-300 text-[11px] font-bold flex items-center gap-1 hover:bg-purple-600/30 disabled:opacity-50"
             >
-              <Sparkles className="w-3 h-3" /> AI Emojis
+              {aiEmojisBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+              {aiEmojisBusy ? "Gerando..." : "AI Emojis"}
             </button>
           </div>
           <p className="text-[11px] text-slate-400">
             Toque na palavra para pular o vídeo; clique duas vezes para editar o texto.
           </p>
+
+          {/* Inline Word Editor */}
+          {editingWord && (
+            <form
+              onSubmit={e => { e.preventDefault(); commitEditWord(false); }}
+              className="p-2.5 rounded-xl bg-[#090d16] border border-purple-500/40 space-y-2 text-xs"
+            >
+              <span className="text-[10px] font-bold text-purple-300 block">Editar palavra #{editingWord.idx + 1}</span>
+              <input
+                autoFocus
+                value={editingWord.text}
+                onChange={e => setEditingWord({ ...editingWord, text: e.target.value })}
+                placeholder="Digite o texto ou deixe vazio para remover"
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[#111827] border border-slate-700 text-white text-xs focus:outline-none focus:border-purple-500"
+              />
+              <div className="flex items-center justify-end gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => commitEditWord(true)}
+                  className="px-2.5 py-1 rounded-lg bg-red-600/20 hover:bg-red-600/30 text-red-300 text-[11px] font-bold"
+                >
+                  Remover
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingWord(null)}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-bold"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="px-2.5 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-[11px] font-bold"
+                >
+                  Salvar
+                </button>
+              </div>
+            </form>
+          )}
+
           <div className="max-h-[340px] overflow-y-auto flex flex-wrap gap-1.5 p-2.5 bg-[#090d16] rounded-xl border border-slate-800">
             {clip.words.length === 0 ? (
               <span className="text-xs text-slate-500">Nenhuma palavra transcrita neste trecho.</span>
@@ -246,24 +502,28 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
         {/* CENTER: Real Video Player + Live Subtitles + Framing */}
         <div className="lg:col-span-4 flex flex-col items-center space-y-3 order-1 lg:order-2">
           <div className={`relative w-full ${aspectClass} bg-black rounded-3xl overflow-hidden border-2 border-slate-700 shadow-2xl`}>
-            {/* Real streaming HTML5 video (Split-Screen or Single Frame) */}
-            {clip.layoutMode === "split" ? (
+            {/* Real streaming HTML5 video (Split / Three / Four / Single Frame) */}
+            {videoErr ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center gap-2 bg-slate-950 text-slate-300">
+                <AlertCircle className="w-7 h-7 text-red-400" />
+                <p className="text-xs font-bold">Falha ao carregar o vídeo de preview</p>
+                <button
+                  onClick={() => { setVideoErr(false); loadClip(); }}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold"
+                >
+                  Recarregar
+                </button>
+              </div>
+            ) : clip.layoutMode === "split" ? (
               <div className="absolute inset-0 flex flex-col">
                 {/* Top 40%: Facecam Crop Preview */}
                 <div className="relative h-[40%] w-full overflow-hidden border-b border-white/20 bg-black">
                   <video
+                    ref={facecamVideoRef}
                     src={`/api/projects/${clip.projectId}/video`}
                     playsInline
                     muted
-                    ref={el => {
-                      if (el && videoRef.current) {
-                        if (Math.abs(el.currentTime - videoRef.current.currentTime) > 0.25) {
-                          el.currentTime = videoRef.current.currentTime;
-                        }
-                        if (playing && el.paused) el.play().catch(() => {});
-                        if (!playing && !el.paused) el.pause();
-                      }
-                    }}
+                    onError={() => setVideoErr(true)}
                     className="w-full h-full object-cover"
                     style={{
                       objectPosition: `${(clip.framing.camX ?? 0.15) * 100}% ${(clip.framing.camY ?? 0.8) * 100}%`,
@@ -285,12 +545,99 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                     muted={muted}
                     onTimeUpdate={handleTimeUpdate}
                     onEnded={() => setPlaying(false)}
+                    onError={() => setVideoErr(true)}
                     className="w-full h-full object-cover"
                     style={{
                       filter: clip.autoColor?.enabled ? "contrast(1.08) saturate(1.14)" : undefined
                     }}
                   />
                 </div>
+              </div>
+            ) : clip.layoutMode === "three" ? (
+              <div className="absolute inset-0 flex flex-col">
+                <div className="relative h-1/2 w-full overflow-hidden border-b border-white/20 bg-black">
+                  <video
+                    ref={videoRef}
+                    src={`/api/projects/${clip.projectId}/video`}
+                    playsInline
+                    muted={muted}
+                    onTimeUpdate={handleTimeUpdate}
+                    onEnded={() => setPlaying(false)}
+                    onError={() => setVideoErr(true)}
+                    className="w-full h-full object-cover"
+                    style={{
+                      objectPosition: `${(clip.framing.panX ?? 0.5) * 100}% ${(clip.framing.panY ?? 0.5) * 100}%`,
+                      transform: `scale(${clip.framing.zoom || 1})`,
+                      filter: clip.autoColor?.enabled ? "contrast(1.08) saturate(1.14)" : undefined
+                    }}
+                  />
+                  <span className="absolute top-1.5 left-2 bg-black/70 text-[9px] text-purple-300 font-mono px-1.5 py-0.5 rounded z-10">PAINEL 1</span>
+                </div>
+                <div className="h-1/2 w-full grid grid-cols-2">
+                  {[0, 1].map(idx => (
+                    <div key={idx} className={`relative h-full overflow-hidden bg-black ${idx === 0 ? "border-r border-white/20" : ""}`}>
+                      <video
+                        ref={el => { auxVideoRefs.current[idx] = el; }}
+                        src={`/api/projects/${clip.projectId}/video`}
+                        playsInline
+                        muted
+                        onError={() => setVideoErr(true)}
+                        className="w-full h-full object-cover"
+                        style={{
+                          objectPosition: idx === 0 ? "20% 50%" : "80% 50%",
+                          transform: "scale(1.35)",
+                          filter: clip.autoColor?.enabled ? "contrast(1.08) saturate(1.14)" : undefined
+                        }}
+                      />
+                      <span className="absolute top-1 left-1.5 bg-black/70 text-[9px] text-emerald-300 font-mono px-1 py-0.5 rounded z-10">
+                        PAINEL {idx + 2}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : clip.layoutMode === "four" ? (
+              <div className="absolute inset-0 grid grid-cols-2 grid-rows-2">
+                <div className="relative overflow-hidden border-r border-b border-white/20 bg-black">
+                  <video
+                    ref={videoRef}
+                    src={`/api/projects/${clip.projectId}/video`}
+                    playsInline
+                    muted={muted}
+                    onTimeUpdate={handleTimeUpdate}
+                    onEnded={() => setPlaying(false)}
+                    onError={() => setVideoErr(true)}
+                    className="w-full h-full object-cover"
+                    style={{
+                      objectPosition: "25% 25%",
+                      transform: `scale(${Math.max(1.2, clip.framing.zoom || 1)})`,
+                      filter: clip.autoColor?.enabled ? "contrast(1.08) saturate(1.14)" : undefined
+                    }}
+                  />
+                  <span className="absolute top-1 left-1.5 bg-black/70 text-[9px] text-purple-300 font-mono px-1 py-0.5 rounded z-10">QUAD 1</span>
+                </div>
+                {[
+                  { pos: "75% 25%", label: "QUAD 2", border: "border-b border-white/20" },
+                  { pos: "25% 75%", label: "QUAD 3", border: "border-r border-white/20" },
+                  { pos: "75% 75%", label: "QUAD 4", border: "" }
+                ].map((q, idx) => (
+                  <div key={q.label} className={`relative overflow-hidden bg-black ${q.border}`}>
+                    <video
+                      ref={el => { auxVideoRefs.current[idx] = el; }}
+                      src={`/api/projects/${clip.projectId}/video`}
+                      playsInline
+                      muted
+                      onError={() => setVideoErr(true)}
+                      className="w-full h-full object-cover"
+                      style={{
+                        objectPosition: q.pos,
+                        transform: "scale(1.3)",
+                        filter: clip.autoColor?.enabled ? "contrast(1.08) saturate(1.14)" : undefined
+                      }}
+                    />
+                    <span className="absolute top-1 left-1.5 bg-black/70 text-[9px] text-emerald-300 font-mono px-1 py-0.5 rounded z-10">{q.label}</span>
+                  </div>
+                ))}
               </div>
             ) : (
               <video
@@ -300,6 +647,7 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                 muted={muted}
                 onTimeUpdate={handleTimeUpdate}
                 onEnded={() => setPlaying(false)}
+                onError={() => setVideoErr(true)}
                 className={`absolute inset-0 w-full h-full ${clip.layoutMode === "fit" ? "object-contain" : "object-cover"}`}
                 style={{
                   objectPosition: `${(clip.framing.panX ?? 0.5) * 100}% ${(clip.framing.panY ?? 0.5) * 100}%`,
@@ -341,7 +689,10 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                 className="absolute left-3 right-3 z-20 text-center pointer-events-none px-2"
                 style={{ top: `${posY * 100}%`, transform: "translateY(-50%)" }}
               >
-                <div className="inline-flex flex-wrap justify-center gap-1.5 font-black text-lg leading-tight drop-shadow-[0_2px_6px_rgba(0,0,0,0.95)]">
+                <div
+                  className="inline-flex flex-wrap justify-center gap-1.5 font-black leading-tight drop-shadow-[0_2px_6px_rgba(0,0,0,0.95)]"
+                  style={{ fontSize: `${fontSize}px` }}
+                >
                   {visibleWords.map(({ w, i }) => {
                     const active = i === activeWordIdx;
                     const txt = uppercase ? w.text.toUpperCase() : w.text;
@@ -419,7 +770,7 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                   max={Math.max(1, clip.endSec - 3)}
                   step={0.5}
                   value={clip.startSec}
-                  onChange={e => saveChanges({ startSec: parseFloat(e.target.value) })}
+                  onChange={e => debouncedSaveChanges({ startSec: parseFloat(e.target.value) })}
                   className="w-full accent-emerald-500"
                 />
               </label>
@@ -431,7 +782,7 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                   max={Math.max(clip.endSec, project.duration || clip.endSec)}
                   step={0.5}
                   value={clip.endSec}
-                  onChange={e => saveChanges({ endSec: parseFloat(e.target.value) })}
+                  onChange={e => debouncedSaveChanges({ endSec: parseFloat(e.target.value) })}
                   className="w-full accent-emerald-500"
                 />
               </label>
@@ -500,7 +851,7 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                   <input
                     type="color"
                     value={highlightColor}
-                    onChange={e => saveChanges({ captionConfig: { ...clip.captionConfig, highlightColor: e.target.value } })}
+                    onChange={e => debouncedSaveChanges({ captionConfig: { ...clip.captionConfig, highlightColor: e.target.value } })}
                     className="w-full h-8 rounded bg-transparent cursor-pointer"
                   />
                 </label>
@@ -512,11 +863,23 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                     max={0.88}
                     step={0.02}
                     value={posY}
-                    onChange={e => saveChanges({ captionConfig: { ...clip.captionConfig, positionY: parseFloat(e.target.value) } })}
+                    onChange={e => debouncedSaveChanges({ captionConfig: { ...clip.captionConfig, positionY: parseFloat(e.target.value) } })}
                     className="w-full accent-purple-500"
                   />
                 </label>
               </div>
+              <label className="block space-y-1">
+                <span className="text-[11px] text-slate-400">Tamanho da Fonte ({fontSize}px)</span>
+                <input
+                  type="range"
+                  min={14}
+                  max={42}
+                  step={1}
+                  value={fontSize}
+                  onChange={e => debouncedSaveChanges({ captionConfig: { ...clip.captionConfig, fontSize: parseInt(e.target.value, 10) } })}
+                  className="w-full accent-purple-500"
+                />
+              </label>
             </div>
           )}
 
@@ -579,13 +942,13 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                     <label className="block">
                       <span className="text-[11px] text-slate-400">Facecam Horizontal X ({Math.round((clip.framing.camX ?? 0.15) * 100)}%)</span>
                       <input type="range" min={0.05} max={0.95} step={0.01} value={clip.framing.camX ?? 0.15}
-                        onChange={e => saveChanges({ framing: { ...clip.framing, camX: parseFloat(e.target.value) } })}
+                        onChange={e => debouncedSaveChanges({ framing: { ...clip.framing, camX: parseFloat(e.target.value) } })}
                         className="w-full accent-emerald-500" />
                     </label>
                     <label className="block">
                       <span className="text-[11px] text-slate-400">Facecam Vertical Y ({Math.round((clip.framing.camY ?? 0.8) * 100)}%)</span>
                       <input type="range" min={0.05} max={0.95} step={0.01} value={clip.framing.camY ?? 0.8}
-                        onChange={e => saveChanges({ framing: { ...clip.framing, camY: parseFloat(e.target.value) } })}
+                        onChange={e => debouncedSaveChanges({ framing: { ...clip.framing, camY: parseFloat(e.target.value) } })}
                         className="w-full accent-emerald-500" />
                     </label>
                     <label className="block">
@@ -593,7 +956,7 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                       <input type="range" min={0.15} max={0.55} step={0.01} value={clip.framing.camW ?? 0.28}
                         onChange={e => {
                           const v = parseFloat(e.target.value);
-                          saveChanges({ framing: { ...clip.framing, camW: v, camH: Number(Math.min(0.6, v * 1.15).toFixed(2)) } });
+                          debouncedSaveChanges({ framing: { ...clip.framing, camW: v, camH: Number(Math.min(0.6, v * 1.15).toFixed(2)) } });
                         }}
                         className="w-full accent-emerald-500" />
                     </label>
@@ -603,19 +966,19 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                     <label className="block">
                       <span className="text-[11px] text-slate-400">Zoom ({(clip.framing.zoom || 1).toFixed(2)}x)</span>
                       <input type="range" min={1} max={2.5} step={0.05} value={clip.framing.zoom || 1}
-                        onChange={e => saveChanges({ framing: { ...clip.framing, zoom: parseFloat(e.target.value) } })}
+                        onChange={e => debouncedSaveChanges({ framing: { ...clip.framing, zoom: parseFloat(e.target.value) } })}
                         className="w-full accent-purple-500" />
                     </label>
                     <label className="block">
                       <span className="text-[11px] text-slate-400">Horizontal Pan ({Math.round((clip.framing.panX ?? 0.5) * 100)}%)</span>
                       <input type="range" min={0} max={1} step={0.02} value={clip.framing.panX ?? 0.5}
-                        onChange={e => saveChanges({ framing: { ...clip.framing, panX: parseFloat(e.target.value) } })}
+                        onChange={e => debouncedSaveChanges({ framing: { ...clip.framing, panX: parseFloat(e.target.value) } })}
                         className="w-full accent-purple-500" />
                     </label>
                     <label className="block">
                       <span className="text-[11px] text-slate-400">Vertical Pan ({Math.round((clip.framing.panY ?? 0.5) * 100)}%)</span>
                       <input type="range" min={0} max={1} step={0.02} value={clip.framing.panY ?? 0.5}
-                        onChange={e => saveChanges({ framing: { ...clip.framing, panY: parseFloat(e.target.value) } })}
+                        onChange={e => debouncedSaveChanges({ framing: { ...clip.framing, panY: parseFloat(e.target.value) } })}
                         className="w-full accent-purple-500" />
                     </label>
                   </>
@@ -700,21 +1063,61 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
               <div className="p-3 rounded-xl bg-[#090d16] border border-slate-800 space-y-2">
                 <span className="font-bold text-purple-300 block">🎵 Música de Fundo (BGM + Audio Ducking)</span>
                 <p className="text-[10px] text-slate-400">O FFmpeg abaixa a música automaticamente quando alguém fala.</p>
+
+                {bgmTrack && (
+                  <div className="p-2 rounded-lg bg-purple-500/10 border border-purple-500/30 flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-purple-200 font-semibold truncate flex items-center gap-1.5">
+                      <Music className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                      {bgmTrack.name || "Trilha BGM anexada"}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={bgmBusy}
+                      onClick={async () => {
+                        setBgmBusy(true);
+                        setActionErr(null);
+                        setActionMsg(null);
+                        try {
+                          const r = await api.removeBgm(clip.id);
+                          setClip(r.clip);
+                          setActionMsg("Música de fundo removida.");
+                        } catch (e: unknown) {
+                          setActionErr(e instanceof Error ? e.message : "Erro ao remover BGM.");
+                        } finally {
+                          setBgmBusy(false);
+                        }
+                      }}
+                      className="px-2 py-1 rounded bg-red-600/20 hover:bg-red-600/30 text-red-300 text-[10px] font-bold flex items-center gap-1 shrink-0 disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3 h-3" /> Remover
+                    </button>
+                  </div>
+                )}
+
                 <label className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold text-center cursor-pointer block">
-                  Enviar MP3 / WAV de Fundo
+                  {bgmBusy ? "Enviando áudio..." : bgmTrack ? "Trocar MP3 / WAV de Fundo" : "Enviar MP3 / WAV de Fundo"}
                   <input
+                    ref={bgmInputRef}
                     type="file"
                     accept="audio/*"
+                    disabled={bgmBusy}
                     className="hidden"
                     onChange={async e => {
                       const f = e.target.files?.[0];
                       if (!f) return;
-                      const fd = new FormData();
-                      fd.append("audio", f);
-                      fd.append("volume", "0.22");
-                      fd.append("ducking", "true");
-                      const r = await fetch(`/api/clips/${clip.id}/bgm`, { method: "POST", body: fd }).then(x => x.json());
-                      if (r.clip) setClip(r.clip);
+                      setBgmBusy(true);
+                      setActionErr(null);
+                      setActionMsg(null);
+                      try {
+                        const r = await api.uploadBgm(clip.id, f, 0.22, true);
+                        setClip(r.clip);
+                        setActionMsg(`Música "${f.name}" anexada com Audio Ducking!`);
+                      } catch (err: unknown) {
+                        setActionErr(err instanceof Error ? err.message : "Erro ao enviar música de fundo.");
+                      } finally {
+                        setBgmBusy(false);
+                        if (bgmInputRef.current) bgmInputRef.current.value = "";
+                      }
                     }}
                   />
                 </label>
@@ -727,18 +1130,24 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
                   {["English", "Español", "Português"].map(lang => (
                     <button
                       key={lang}
+                      disabled={translatingLang !== null}
                       onClick={async () => {
-                        const r = await fetch(`/api/clips/${clip.id}/translate`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ targetLang: lang })
-                        }).then(x => x.json());
-                        if (r.words) setClip(prev => (prev ? { ...prev, words: r.words } : prev));
-                        else if (r.error) alert(r.error);
+                        setTranslatingLang(lang);
+                        setActionErr(null);
+                        setActionMsg(null);
+                        try {
+                          const r = await api.translateClip(clip.id, lang);
+                          setClip(prev => (prev ? { ...prev, words: r.words } : prev));
+                          setActionMsg(`Legendas traduzidas para ${lang}!`);
+                        } catch (e: unknown) {
+                          setActionErr(e instanceof Error ? e.message : "Erro ao traduzir legendas.");
+                        } finally {
+                          setTranslatingLang(null);
+                        }
                       }}
-                      className="py-1.5 rounded-lg bg-slate-800 hover:bg-emerald-600/30 border border-slate-700 text-[11px] font-bold text-white"
+                      className="py-1.5 rounded-lg bg-slate-800 hover:bg-emerald-600/30 border border-slate-700 text-[11px] font-bold text-white disabled:opacity-50"
                     >
-                      {lang}
+                      {translatingLang === lang ? "..." : lang}
                     </button>
                   ))}
                 </div>
@@ -760,13 +1169,25 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
               <label className="block">
                 <span className="text-[11px] text-slate-400">Nitidez / Sharpen ({clip.autoColor?.sharpen ?? 0.5})</span>
                 <input type="range" min={0} max={1.5} step={0.1} value={clip.autoColor?.sharpen ?? 0.5}
-                  onChange={e => saveChanges({ autoColor: { ...clip.autoColor, sharpen: parseFloat(e.target.value) } })}
+                  onChange={e => debouncedSaveChanges({ autoColor: { ...clip.autoColor, sharpen: parseFloat(e.target.value) } })}
                   className="w-full accent-purple-500" />
               </label>
               <label className="block">
                 <span className="text-[11px] text-slate-400">Redução de Ruído / Denoise ({clip.autoColor?.denoise ?? 0})</span>
                 <input type="range" min={0} max={1} step={0.1} value={clip.autoColor?.denoise ?? 0}
-                  onChange={e => saveChanges({ autoColor: { ...clip.autoColor, denoise: parseFloat(e.target.value) } })}
+                  onChange={e => debouncedSaveChanges({ autoColor: { ...clip.autoColor, denoise: parseFloat(e.target.value) } })}
+                  className="w-full accent-purple-500" />
+              </label>
+              <label className="block">
+                <span className="text-[11px] text-slate-400">Suavização de Blocos / Deblock ({clip.autoColor?.deblock ?? 0})</span>
+                <input type="range" min={0} max={1} step={0.1} value={clip.autoColor?.deblock ?? 0}
+                  onChange={e => debouncedSaveChanges({ autoColor: { ...clip.autoColor, deblock: parseFloat(e.target.value) } })}
+                  className="w-full accent-purple-500" />
+              </label>
+              <label className="block">
+                <span className="text-[11px] text-slate-400">Brilho / Glow ({clip.autoColor?.glow ?? 0})</span>
+                <input type="range" min={0} max={1} step={0.1} value={clip.autoColor?.glow ?? 0}
+                  onChange={e => debouncedSaveChanges({ autoColor: { ...clip.autoColor, glow: parseFloat(e.target.value) } })}
                   className="w-full accent-purple-500" />
               </label>
             </div>
@@ -825,10 +1246,10 @@ export const EditorView: React.FC<Props> = ({ clipId, presets, brandKits, onBack
 
             <button
               onClick={triggerRender}
-              disabled={clip.exportStatus === "rendering"}
+              disabled={renderBusy || clip.exportStatus === "rendering"}
               className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-black font-black text-xs disabled:opacity-50"
             >
-              {clip.exportStatus === "rendering" ? "Renderizando..." : "Iniciar Renderização FFmpeg"}
+              {renderBusy ? "Iniciando..." : clip.exportStatus === "rendering" ? "Renderizando..." : "Iniciar Renderização FFmpeg"}
             </button>
           </div>
         </div>
